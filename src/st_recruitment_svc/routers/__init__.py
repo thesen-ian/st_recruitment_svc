@@ -245,3 +245,10 @@ try:
     router.include_router(job_seekers.router)
 except Exception:
     logger.debug("Job seekers router not available during import")
+
+# Include companies router
+try:
+    from . import companies
+    router.include_router(companies.router)
+except Exception:
+    logger.debug("Companies router not available during import")
