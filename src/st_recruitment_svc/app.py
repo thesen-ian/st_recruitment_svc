@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from http.client import responses as HTTP_STATUS_MESSAGES
 from starlette.staticfiles import StaticFiles
 
@@ -96,7 +97,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
     payload = _error_envelope("validation_error", "Validation failed", details)
     logger.debug("Validation error response prepared: %s", payload)
-    return JSONResponse(status_code=422, content=payload)
+
+    # Ensure payload is JSON serializable; use jsonable_encoder to convert pydantic/exception objects
+    try:
+        safe_payload = jsonable_encoder(payload)
+    except Exception:
+        logger.exception("Failed to encode validation payload for JSON response", exc_info=True)
+        # Fallback to a minimal safe payload
+        safe_payload = {"error": {"type": "validation_error", "message": "Validation failed"}}
+
+    return JSONResponse(status_code=422, content=safe_payload)
 
 
 # Exception handler for HTTPException to normalize 401 and 403
