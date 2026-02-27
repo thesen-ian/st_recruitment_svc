@@ -277,3 +277,70 @@ def create_file_object(
         except Exception:
             logger.error("Failed during orphan cleanup", exc_info=True)
         raise StorageError("failed to persist file metadata") from e
+
+
+# INTERNAL helper: canonical UploadFile handling pattern
+# Summary: When accepting a Starlette/FastAPI UploadFile in synchronous code, read bytes using
+# upload_file.file.read() (sync file-like) rather than awaiting upload_file.read().
+# After reading bytes, use validate_file, build_relative_path, write_file to persist into the
+# PUBLIC_FILES_DIR, then create_file_object(...) to persist DB metadata. Public URL is /public/{storage_path}.
+# This helper centralizes that pattern for tests and future endpoints.
+from starlette.datastructures import UploadFile as StarletteUploadFile
+
+
+def persist_uploadfile_as_public(
+    db_session,
+    owner_user_id: str,
+    upload_file: StarletteUploadFile,
+    purpose: FilePurpose,
+):
+    """Persist a Starlette UploadFile as a public FileObject and return (FileObject, public_url).
+
+    This is a synchronous helper intended for use in router handlers or tests where sync code
+    reads upload_file.file (a file-like object). It validates content type and size using
+    validate_file and writes bytes into PUBLIC_FILES_DIR via write_file.
+    """
+    try:
+        # read bytes from the underlying file-like object (sync pattern)
+        # Note: upload_file.read() is async; use upload_file.file.read() in sync contexts
+        upload_file.file.seek(0)
+        data = upload_file.file.read()
+        if data is None:
+            data = b""
+        if isinstance(data, str):
+            data = data.encode()
+
+        content_type = getattr(upload_file, "content_type", None) or "application/octet-stream"
+        size = len(data)
+
+        # validate against purpose limits
+        validate_file(purpose, size, content_type)
+
+        # generate file id and storage path
+        file_id = uuid.uuid4().hex
+
+        rel = build_relative_path(Visibility.public, purpose, owner_user_id, file_id, original_filename=getattr(upload_file, "filename", None), content_type=content_type)
+
+        # import config lazily so tests can set env and reload config before calling
+        from st_recruitment_svc.config import PUBLIC_FILES_DIR
+
+        # write bytes to public root
+        abs_path, written = write_file(PUBLIC_FILES_DIR, rel, data)
+
+        # create DB row
+        fo = create_file_object(
+            db_session,
+            owner_user_id=owner_user_id,
+            visibility=Visibility.public,
+            purpose=purpose,
+            content_type=content_type,
+            size_bytes=written,
+            storage_path=rel,
+            original_filename=getattr(upload_file, "filename", None),
+        )
+
+        public_url = f"/public/{rel}"
+        return fo, public_url
+    except Exception as e:
+        logger.error("Failed to persist upload file for owner %s: %s", owner_user_id, e, exc_info=True)
+        raise
