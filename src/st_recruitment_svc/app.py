@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
@@ -12,6 +13,7 @@ from starlette.staticfiles import StaticFiles
 
 from st_recruitment_svc.routers import router
 from st_recruitment_svc import config
+from st_recruitment_svc import scheduler
 
 # Configure logger for module
 logger = logging.getLogger(__name__)
@@ -45,8 +47,25 @@ except Exception as e:
     logger.error("Failed to ensure PUBLIC_FILES_DIR exists: %s", _public_files_dir, exc_info=True)
     raise
 
-# Use a plain FastAPI app. Avoid making unrelated router customizations
-app = FastAPI(debug=True)
+
+# Use FastAPI lifespan context manager for startup/shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Attempt to start scheduler but do not prevent app startup on failure
+    try:
+        scheduler.start_scheduler()
+    except Exception as e:
+        logger.error("Scheduler failed to start during app startup", exc_info=True)
+    try:
+        yield
+    finally:
+        try:
+            scheduler.shutdown_scheduler()
+        except Exception as e:
+            logger.error("Scheduler failed to shutdown cleanly", exc_info=True)
+
+
+app = FastAPI(debug=True, lifespan=lifespan)
 
 # Mount all API routes under a single router at /api
 app.include_router(router, prefix="/api")
