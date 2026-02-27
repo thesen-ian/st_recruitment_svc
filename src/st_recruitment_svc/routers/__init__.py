@@ -238,3 +238,10 @@ def download_private_file(
     # Content disposition
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return StreamingResponse(fp, media_type=fo.content_type or "application/octet-stream", headers=headers)
+
+# Include job_seekers router to aggregate routes
+try:
+    from . import job_seekers
+    router.include_router(job_seekers.router)
+except Exception:
+    logger.debug("Job seekers router not available during import")
