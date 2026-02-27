@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "st_recruitment_svc"
+version = "1.0.0"
+description = ""
+authors = ["ThesenAI"]
+readme = "README.md"
+packages = [{include = "st_recruitment_svc", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+python-dotenv = "^1.0.1"
+alembic = "^1.14.0"
+sqlalchemy = "^2.0.36"
+pydantic = "^2.10.2"
+fastapi = "^0.115.5"
+uvicorn = "^0.32.1"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+
+[tool.poetry.scripts]
+st_recruitment_svc = "st_recruitment_svc.main:main"
+
+[tool.pytest.ini_options]
+pythonpath = [ "src/" ]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
