@@ -17,6 +17,9 @@ from sqlalchemy import (
     Text,
     func,
     create_engine,
+    CheckConstraint,
+    UniqueConstraint,
+    Index,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, scoped_session, sessionmaker, Session
@@ -63,6 +66,13 @@ class Visibility(str, enum.Enum):
     private = "private"
 
 
+class FilePurpose(str, enum.Enum):
+    resume = "resume"
+    company_logo = "company_logo"
+    company_cover = "company_cover"
+    application_answer = "application_answer"
+
+
 # ORM models
 class User(Base):
     __tablename__ = "users"
@@ -96,31 +106,54 @@ class Token(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    token_hash = Column(String(512), nullable=False)
+    # token_hash must be unique per spec
+    token_hash = Column(String(512), nullable=False, unique=True)
     type = Column(SAEnum(TokenType, name="token_type"), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
     # created_at to track issuance time for tokens
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+    # link to file object for download tokens; nullable to support other token types
+    file_object_id = Column(String(36), ForeignKey("file_objects.id", ondelete="CASCADE"), nullable=True, index=True)
+
     user = relationship("User", back_populates="tokens")
+    file_object = relationship("FileObject", back_populates="tokens")
+
+    __table_args__ = (
+        Index('idx_tokens_type', 'type'),
+        Index('idx_tokens_file_object_id', 'file_object_id'),
+        Index('idx_tokens_expires_at', 'expires_at'),
+        CheckConstraint('expires_at > created_at', name='chk_tokens_expires_after_created'),
+    )
 
 
 class FileObject(Base):
     __tablename__ = "file_objects"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    owner_user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # remove auto-named index to keep migration index naming deterministic
+    owner_user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     visibility = Column(SAEnum(Visibility, name="file_visibility"), nullable=False, server_default=Visibility.private.value)
-    purpose = Column(String(255), nullable=False)
-    original_filename = Column(String(1024), nullable=False)
+    purpose = Column(SAEnum(FilePurpose, name="file_purpose"), nullable=False)
+    # original filename is optional per spec
+    original_filename = Column(String(1024), nullable=True)
     content_type = Column(String(255), nullable=False)
     size_bytes = Column(BigInteger, nullable=False)
     storage_path = Column(String(2048), nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
     owner = relationship("User", back_populates="file_objects")
+    tokens = relationship("Token", back_populates="file_object")
+
+    __table_args__ = (
+        Index('idx_file_objects_owner_user_id', 'owner_user_id'),
+        UniqueConstraint('storage_path', name='uq_file_objects_storage_path'),
+        CheckConstraint('size_bytes >= 0', name='chk_file_objects_size_bytes_nonnegative'),
+        Index('idx_file_objects_visibility', 'visibility'),
+    )
 
 
 class Notification(Base):
