@@ -13,4 +13,6 @@ from .base import (
     JobPosting,
     JobPostingQuestion,
     JobPostingQuestionOption,
+    Application,
+    ApplicationAnswer,
 )

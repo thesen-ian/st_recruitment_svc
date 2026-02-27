@@ -116,6 +116,11 @@ class QuestionType(str, enum.Enum):
     file = "file"
 
 
+# Application-specific enums
+class ApplicationStatus(str, enum.Enum):
+    Applied = "Applied"
+
+
 # ORM models
 class User(Base):
     __tablename__ = "users"
@@ -406,6 +411,50 @@ class JobPostingQuestionOption(Base):
     __table_args__ = (
         Index('idx_job_posting_question_options_question_id', 'question_id'),
         UniqueConstraint('question_id', 'position', name='uq_job_posting_question_options_question_id_position'),
+    )
+
+
+# Applications and answers
+class Application(Base):
+    __tablename__ = "applications"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_id = Column(String(36), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False)
+    job_seeker_user_id = Column(String(36), nullable=False)
+    selected_resume_id = Column(String(36), ForeignKey("resumes.id", ondelete="RESTRICT"), nullable=False)
+    cover_letter = Column(Text, nullable=True)
+    status = Column(SAEnum(ApplicationStatus, name="application_status"), nullable=False, server_default=ApplicationStatus.Applied.value)
+    applied_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    answers = relationship("ApplicationAnswer", back_populates="application", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        UniqueConstraint('job_id', 'job_seeker_user_id', name='uq_applications_job_id_job_seeker_user_id'),
+        Index('idx_applications_job_seeker_user_id', 'job_seeker_user_id'),
+        Index('idx_applications_job_id', 'job_id'),
+        Index('idx_applications_status', 'status'),
+        Index('idx_applications_job_id_status', 'job_id', 'status'),
+    )
+
+
+class ApplicationAnswer(Base):
+    __tablename__ = "application_answers"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    application_id = Column(String(36), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    question_id = Column(String(36), ForeignKey("job_posting_questions.id", ondelete="RESTRICT"), nullable=False)
+    answer_text = Column(Text, nullable=True)
+    selected_option_id = Column(String(36), ForeignKey("job_posting_question_options.id", ondelete="RESTRICT"), nullable=True)
+    file_object_id = Column(String(36), ForeignKey("file_objects.id", ondelete="RESTRICT"), nullable=True)
+
+    application = relationship("Application", back_populates="answers")
+
+    __table_args__ = (
+        UniqueConstraint('application_id', 'question_id', name='uq_application_answers_application_id_question_id'),
+        Index('idx_application_answers_application_id', 'application_id'),
+        Index('idx_application_answers_question_id', 'question_id'),
+        CheckConstraint("((answer_text IS NOT NULL) + (selected_option_id IS NOT NULL) + (file_object_id IS NOT NULL)) = 1", name='chk_application_answers_single_answer_field'),
     )
 
 
