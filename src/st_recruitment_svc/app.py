@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from http.client import responses as HTTP_STATUS_MESSAGES
+from starlette.staticfiles import StaticFiles
 
 from st_recruitment_svc.routers import router
+from st_recruitment_svc import config
 
 # Configure logger for module
 logger = logging.getLogger(__name__)
@@ -26,11 +29,34 @@ def _error_envelope(error_type: str, message: str, details: Optional[List[Any]] 
     return payload
 
 
+# Validate PUBLIC_FILES_DIR before creating/mounting the app
+_public_files_dir = getattr(config, "PUBLIC_FILES_DIR", None)
+if not _public_files_dir or (isinstance(_public_files_dir, str) and _public_files_dir.strip() == ""):
+    # Fail fast if configuration is missing or empty
+    raise RuntimeError("PUBLIC_FILES_DIR is not configured")
+
+# Normalize to Path
+_public_files_path = Path(_public_files_dir)
+try:
+    # If configured but doesn't exist, create it deterministically
+    if not _public_files_path.exists():
+        _public_files_path.mkdir(parents=True, exist_ok=True)
+except Exception as e:
+    logger.error("Failed to ensure PUBLIC_FILES_DIR exists: %s", _public_files_dir, exc_info=True)
+    raise
+
 # Use a plain FastAPI app. Avoid making unrelated router customizations
 app = FastAPI(debug=True)
 
 # Mount all API routes under a single router at /api
 app.include_router(router, prefix="/api")
+
+# Mount public static files. Use str() to accept Path or str.
+try:
+    app.mount("/public", StaticFiles(directory=str(_public_files_path)), name="public")
+except Exception:
+    logger.error("Failed to mount /public static files from %s", _public_files_path, exc_info=True)
+    raise
 
 
 # Exception handler for request validation errors from FastAPI
