@@ -169,3 +169,173 @@ def test_delete_job_owner_and_cascade(client, db_session):
     assert db_session.execute(stmt).scalars().first() is None
 
 
+# ------------------- Publish / Close lifecycle tests -------------------
+
+def test_publish_success_sets_published_at(client, db_session):
+    company, token = create_company_and_token(db_session)
+    payload = {
+        "title": "Engineer",
+        "description": "Great role",
+        "questions": [
+            {"type": "mcq", "prompt": "Choose", "options": [{"label": "One"}]}
+        ]
+    }
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    assert r.status_code == 201
+    job = r.json()
+
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub.status_code == 200, pub.text
+    out = pub.json()
+    assert out["state"] == "active"
+    assert out["published_at"] is not None
+
+
+def test_publish_validation_missing_title_description_returns_422(client, db_session):
+    company, token = create_company_and_token(db_session)
+    # create job with empty title/description (allowed at create time)
+    payload = {"title": "", "description": ""}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    assert r.status_code == 201
+    job = r.json()
+
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub.status_code == 422
+
+
+def test_publish_validation_mcq_without_options_returns_422(client, db_session):
+    company, token = create_company_and_token(db_session)
+    # create a valid job first
+    payload = {"title": "T", "description": "D"}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    job = r.json()
+
+    # Insert an mcq question with no options directly in DB to simulate inconsistent state
+    stmt = select(JobPosting).where(JobPosting.id == job['id'])
+    persisted = db_session.execute(stmt).scalars().first()
+    # clear existing questions and add invalid one
+    persisted.questions = []
+    db_session.flush()
+    q = JobPostingQuestion(job_posting_id=persisted.id, type=QuestionType.mcq, prompt="Pick", is_required=False, position=0)
+    db_session.add(q)
+    db_session.commit()
+
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub.status_code == 422
+
+
+def test_publish_validation_non_mcq_with_options_returns_422(client, db_session):
+    company, token = create_company_and_token(db_session)
+    payload = {"title": "T", "description": "D"}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    job = r.json()
+
+    stmt = select(JobPosting).where(JobPosting.id == job['id'])
+    persisted = db_session.execute(stmt).scalars().first()
+    persisted.questions = []
+    db_session.flush()
+    q = JobPostingQuestion(job_posting_id=persisted.id, type=QuestionType.text, prompt="Tell us", is_required=False, position=0)
+    db_session.add(q)
+    db_session.flush()
+    # Add an option for a non-mcq question to create invalid state
+    opt = JobPostingQuestionOption(question_id=q.id, label="X", position=0)
+    db_session.add(opt)
+    db_session.commit()
+
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub.status_code == 422
+
+
+def test_publish_invalid_transitions_return_422(client, db_session):
+    company, token = create_company_and_token(db_session)
+    payload = {"title": "T", "description": "D"}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    job = r.json()
+
+    # publish first time
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub.status_code == 200
+
+    # publishing again should be invalid
+    pub2 = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub2.status_code == 422
+
+    # close it
+    close = client.post(f"/api/jobs/{job['id']}/close", headers=auth_header(token))
+    assert close.status_code == 200
+
+    # publishing a closed job is invalid
+    pub3 = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub3.status_code == 422
+
+
+def test_close_success_sets_closed_at(client, db_session):
+    company, token = create_company_and_token(db_session)
+    payload = {"title": "T", "description": "D", "questions": [{"type": "mcq", "prompt": "P", "options": [{"label": "A"}]}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    job = r.json()
+
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(token))
+    assert pub.status_code == 200
+
+    close = client.post(f"/api/jobs/{job['id']}/close", headers=auth_header(token))
+    assert close.status_code == 200
+    out = close.json()
+    assert out["state"] == "closed"
+    assert out["closed_at"] is not None
+
+
+def test_close_invalid_transitions_return_422(client, db_session):
+    company, token = create_company_and_token(db_session)
+    payload = {"title": "T", "description": "D"}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(token))
+    job = r.json()
+
+    # closing a draft should fail
+    close = client.post(f"/api/jobs/{job['id']}/close", headers=auth_header(token))
+    assert close.status_code == 422
+
+    # mark closed and try closing again
+    stmt = select(JobPosting).where(JobPosting.id == job['id'])
+    persisted = db_session.execute(stmt).scalars().first()
+    persisted.state = JobPostingState.closed
+    db_session.commit()
+
+    close2 = client.post(f"/api/jobs/{job['id']}/close", headers=auth_header(token))
+    assert close2.status_code == 422
+
+
+def test_non_owner_company_cannot_publish_or_close(client, db_session):
+    owner, owner_token = create_company_and_token(db_session, email="owner@example.com")
+    other, other_token = create_company_and_token(db_session, email="other@example.com")
+
+    payload = {"title": "T", "description": "D", "questions": [{"type": "mcq", "prompt": "P", "options": [{"label": "A"}]}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(owner_token))
+    job = r.json()
+
+    p = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(other_token))
+    assert p.status_code == 403
+
+    # publish as owner
+    pub = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(owner_token))
+    assert pub.status_code == 200
+
+    c = client.post(f"/api/jobs/{job['id']}/close", headers=auth_header(other_token))
+    assert c.status_code == 403
+
+
+def test_admin_can_publish_and_close_any_job(client, db_session):
+    owner, owner_token = create_company_and_token(db_session, email="owner2@example.com")
+    admin, admin_token = create_admin_and_token(db_session)
+
+    payload = {"title": "T", "description": "D", "questions": [{"type": "mcq", "prompt": "P", "options": [{"label": "A"}]}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(owner_token))
+    job = r.json()
+
+    p = client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(admin_token))
+    assert p.status_code == 200
+    assert p.json()["state"] == "active"
+
+    c = client.post(f"/api/jobs/{job['id']}/close", headers=auth_header(admin_token))
+    assert c.status_code == 200
+    assert c.json()["state"] == "closed"

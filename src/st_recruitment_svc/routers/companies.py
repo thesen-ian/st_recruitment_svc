@@ -609,3 +609,133 @@ def delete_job(
         raise HTTPException(status_code=500, detail="failed to delete job")
 
     return {"deleted": True}
+
+
+# ------------------- Lifecycle endpoints: publish / close -------------------
+
+@router.post("/jobs/{job_id}/publish", response_model=JobPostingOut)
+def publish_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        stmt = select(JobPosting).where(JobPosting.id == job_id)
+        job = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading job %s for publish", job_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    # Authorization: owner or admin
+    if not (current_user.role == UserRole.admin or job.company_id == current_user.id):
+        raise HTTPException(status_code=403, detail="not owner")
+
+    # Only allow draft -> active
+    if job.state == JobPostingState.active:
+        raise HTTPException(status_code=422, detail="job already active")
+    if job.state == JobPostingState.closed:
+        raise HTTPException(status_code=422, detail="cannot publish closed job")
+
+    # Validate required fields and questions
+    errors: List[str] = []
+    now = datetime.now(tz=timezone.utc)
+
+    # Title/description presence
+    if not getattr(job, "title", None) or not str(job.title).strip():
+        errors.append("title must be non-empty")
+    if not getattr(job, "description", None) or not str(job.description).strip():
+        errors.append("description must be non-empty")
+
+    # Deadline check: reject if deadline in the past
+    if getattr(job, "deadline", None) is not None and job.deadline < now:
+        errors.append("deadline must be in the future")
+
+    # Question re-validation
+    try:
+        for q in getattr(job, "questions", []) or []:
+            # type validity
+            if q.type not in (QuestionType.text, QuestionType.mcq, QuestionType.file):
+                errors.append(f"invalid question type for question {getattr(q, 'id', '')}")
+                continue
+            # prompt
+            if not getattr(q, "prompt", None) or not str(q.prompt).strip():
+                errors.append(f"prompt must be non-empty for question {getattr(q, 'id', '')}")
+            # options
+            opts = getattr(q, "options", []) or []
+            if q.type == QuestionType.mcq:
+                if len(opts) < 1:
+                    errors.append(f"mcq question {getattr(q, 'id', '')} requires at least one option")
+                else:
+                    for o in opts:
+                        if not getattr(o, "label", None) or not str(o.label).strip():
+                            errors.append(f"mcq option label must be non-empty for option {getattr(o, 'id', '')}")
+            else:
+                if len(opts) > 0:
+                    errors.append(f"options provided for non-mcq question {getattr(q, 'id', '')}")
+    except Exception:
+        logger.exception("Failed validating questions for job %s", job_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if errors:
+        # Do not change state on validation failure
+        raise HTTPException(status_code=422, detail="; ".join(errors))
+
+    # All validations passed: perform transition
+    try:
+        job.state = JobPostingState.active
+        job.published_at = now
+        if hasattr(job, "updated_at"):
+            job.updated_at = now
+        db.commit()
+        db.refresh(job)
+    except Exception:
+        logger.exception("Failed to publish job %s", job_id)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="failed to publish job")
+
+    return _serialize_job(job)
+
+
+@router.post("/jobs/{job_id}/close", response_model=JobPostingOut)
+def close_job(
+    job_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        stmt = select(JobPosting).where(JobPosting.id == job_id)
+        job = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading job %s for close", job_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    # Authorization: owner or admin
+    if not (current_user.role == UserRole.admin or job.company_id == current_user.id):
+        raise HTTPException(status_code=403, detail="not owner")
+
+    # Only allow active -> closed
+    if job.state == JobPostingState.draft:
+        raise HTTPException(status_code=422, detail="cannot close draft job")
+    if job.state == JobPostingState.closed:
+        raise HTTPException(status_code=422, detail="job already closed")
+
+    now = datetime.now(tz=timezone.utc)
+    try:
+        job.state = JobPostingState.closed
+        job.closed_at = now
+        if hasattr(job, "updated_at"):
+            job.updated_at = now
+        db.commit()
+        db.refresh(job)
+    except Exception:
+        logger.exception("Failed to close job %s", job_id)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="failed to close job")
+
+    return _serialize_job(job)
