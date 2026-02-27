@@ -6,4 +6,5 @@ from .base import (
     FileObject,
     Notification,
     NotificationPreferences,
+    JobSeekerProfile,
 )

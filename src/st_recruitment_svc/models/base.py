@@ -20,6 +20,7 @@ from sqlalchemy import (
     CheckConstraint,
     UniqueConstraint,
     Index,
+    text as sa_text,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, scoped_session, sessionmaker, Session
@@ -31,6 +32,22 @@ Base = declarative_base()
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
+
+# Use JSONB only when the runtime engine is Postgres. Fall back to generic JSON otherwise.
+# Relying on availability of dialect classes is incorrect; check engine dialect instead.
+try:
+    if engine.dialect.name == "postgresql":
+        from sqlalchemy.dialects.postgresql import JSONB  # type: ignore
+
+        JSON_TYPE = JSONB
+        JSON_SERVER_DEFAULT = sa_text("'[]'::jsonb")
+    else:
+        JSON_TYPE = JSON
+        JSON_SERVER_DEFAULT = '[]'
+except Exception:
+    # Be defensive: if anything unexpected happens, fall back to JSON portable type
+    JSON_TYPE = JSON
+    JSON_SERVER_DEFAULT = '[]'
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -99,6 +116,8 @@ class User(Base):
     file_objects = relationship("FileObject", back_populates="owner", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
     notification_preferences = relationship("NotificationPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    # One-to-one job seeker profile when user is a job_seeker
+    job_seeker_profile = relationship("JobSeekerProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 class Token(Base):
@@ -182,3 +201,29 @@ class NotificationPreferences(Base):
     per_event_settings_json = Column(JSON, nullable=False, server_default='{}')
 
     user = relationship("User", back_populates="notification_preferences")
+
+
+class JobSeekerProfile(Base):
+    __tablename__ = "job_seeker_profiles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # explicit index is managed by migration; avoid index=True here to prevent duplicate indexes
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    full_name = Column(Text, nullable=False)
+    email = Column(Text, nullable=False)
+    phone = Column(Text, nullable=True)
+    location = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    experiences = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    education = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    skills = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    languages = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    certifications = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    user = relationship("User", back_populates="job_seeker_profile")
+
+    __table_args__ = (
+        UniqueConstraint('user_id', name='uq_job_seeker_profiles_user_id'),
+    )
