@@ -118,6 +118,8 @@ class User(Base):
     notification_preferences = relationship("NotificationPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
     # One-to-one job seeker profile when user is a job_seeker
     job_seeker_profile = relationship("JobSeekerProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    # Resumes owned by user
+    resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
 
 
 class Token(Base):
@@ -166,6 +168,8 @@ class FileObject(Base):
 
     owner = relationship("User", back_populates="file_objects")
     tokens = relationship("Token", back_populates="file_object")
+    # resume referencing this file object (one-to-one due to unique constraint)
+    resume = relationship("Resume", back_populates="file_object", uselist=False)
 
     __table_args__ = (
         Index('idx_file_objects_owner_user_id', 'owner_user_id'),
@@ -226,4 +230,23 @@ class JobSeekerProfile(Base):
 
     __table_args__ = (
         UniqueConstraint('user_id', name='uq_job_seeker_profiles_user_id'),
+    )
+
+
+class Resume(Base):
+    __tablename__ = "resumes"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    label = Column(Text, nullable=False)
+    file_object_id = Column(String(36), ForeignKey("file_objects.id", ondelete="RESTRICT"), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # relationships to aid ORM usage and ownership checks
+    user = relationship("User", back_populates="resumes")
+    file_object = relationship("FileObject", back_populates="resume")
+
+    __table_args__ = (
+        Index('idx_resumes_user_id', 'user_id'),
+        UniqueConstraint('file_object_id', name='uq_resumes_file_object_id'),
     )

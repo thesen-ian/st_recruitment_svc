@@ -7,4 +7,5 @@ from .base import (
     Notification,
     NotificationPreferences,
     JobSeekerProfile,
+    Resume,
 )
