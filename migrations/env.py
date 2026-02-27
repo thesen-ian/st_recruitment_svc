@@ -13,11 +13,15 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+# Load .env and allow tests to override sqlalchemy.url via alembic.Config
 load_dotenv()
-database_url = os.getenv("DATABASE_URL")
-config.set_main_option('sqlalchemy.url', database_url)
+_database_url = os.getenv("DATABASE_URL")
+# Only set the sqlalchemy.url if DATABASE_URL is present and a string
+if _database_url:
+    config.set_main_option('sqlalchemy.url', str(_database_url))
 
 target_metadata = Base.metadata
+
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
