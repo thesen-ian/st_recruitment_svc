@@ -14,6 +14,7 @@ from starlette.staticfiles import StaticFiles
 from st_recruitment_svc.routers import router
 from st_recruitment_svc import config
 from st_recruitment_svc import scheduler
+from st_recruitment_svc import scheduler_jobs
 
 # Configure logger for module
 logger = logging.getLogger(__name__)
@@ -54,6 +55,12 @@ async def lifespan(app: FastAPI):
     # Attempt to start scheduler but do not prevent app startup on failure
     try:
         scheduler.start_scheduler()
+        try:
+            # After scheduler is started, schedule any registered jobs into it.
+            # Use the scheduler instance directly; keep this call minimal to satisfy startup wiring.
+            scheduler_jobs.schedule_registered_jobs(scheduler._scheduler)
+        except Exception:
+            logger.exception("Failed to schedule registered jobs into scheduler")
     except Exception as e:
         logger.error("Scheduler failed to start during app startup", exc_info=True)
     try:
