@@ -211,6 +211,19 @@ def open_file(root_dir: str, relative_path: str) -> BinaryIO:
         raise StorageNotFoundError("file cannot be opened") from e
 
 
+# Guidance for future implementers:
+# To create a PUBLIC file that will be served under /public:
+# 1) Compute a deterministic relative storage path with build_relative_path(...).
+# 2) Persist bytes into the configured public root using write_file(PUBLIC_FILES_DIR, storage_path, data).
+#    In tests set PUBLIC_FILES_DIR via monkeypatch.setenv("PUBLIC_FILES_DIR", str(tmp_path))
+#    and reload st_recruitment_svc.config and st_recruitment_svc.app so the app mounts /public.
+# 3) Create the DB metadata row with create_file_object(db_session, owner_user_id, Visibility.public, ...,
+#    storage_path=storage_path, ...). This commits the ORM row and returns FileObject.
+# 4) The public URL path is reachable at /public/{storage_path} because the FastAPI app mounts
+#    the configured PUBLIC_FILES_DIR at /public in src/st_recruitment_svc/app.py.
+# The canonical helpers are build_relative_path, write_file, and create_file_object.
+
+
 def create_file_object(
     db_session,
     owner_user_id: str,
