@@ -118,6 +118,8 @@ class User(Base):
     notification_preferences = relationship("NotificationPreferences", back_populates="user", uselist=False, cascade="all, delete-orphan")
     # One-to-one job seeker profile when user is a job_seeker
     job_seeker_profile = relationship("JobSeekerProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    # One-to-one company profile when user is a company
+    company_profile = relationship("CompanyProfile", back_populates="company", uselist=False, cascade="all, delete-orphan")
     # Resumes owned by user
     resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
 
@@ -230,6 +232,33 @@ class JobSeekerProfile(Base):
 
     __table_args__ = (
         UniqueConstraint('user_id', name='uq_job_seeker_profiles_user_id'),
+    )
+
+
+class CompanyProfile(Base):
+    __tablename__ = "company_profiles"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # company_id references users.id (company user) to follow existing service convention
+    company_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    description = Column(Text, nullable=True)
+    website_url = Column(Text, nullable=True)
+    industry = Column(Text, nullable=True)
+    size = Column(Text, nullable=True)
+    hq_location = Column(Text, nullable=True)
+    logo_file_object_id = Column(String(36), ForeignKey("file_objects.id", ondelete="SET NULL"), nullable=True)
+    cover_file_object_id = Column(String(36), ForeignKey("file_objects.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    company = relationship("User", back_populates="company_profile")
+    logo_file_object = relationship("FileObject", foreign_keys=[logo_file_object_id])
+    cover_file_object = relationship("FileObject", foreign_keys=[cover_file_object_id])
+
+    __table_args__ = (
+        UniqueConstraint('company_id', name='uq_company_profiles_company_id'),
+        Index('idx_company_profiles_logo_file_object_id', 'logo_file_object_id'),
+        Index('idx_company_profiles_cover_file_object_id', 'cover_file_object_id'),
     )
 
 

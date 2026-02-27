@@ -8,4 +8,5 @@ from .base import (
     NotificationPreferences,
     JobSeekerProfile,
     Resume,
+    CompanyProfile,
 )
