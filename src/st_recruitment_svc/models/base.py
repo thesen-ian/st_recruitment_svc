@@ -94,11 +94,23 @@ class FilePurpose(str, enum.Enum):
     application_answer = "application_answer"
 
 
-# Job status enum for job postings. Keep values minimal and conventional.
+# Job posting specific enums
 class JobStatus(str, enum.Enum):
     draft = "draft"
     published = "published"
     closed = "closed"
+
+
+class JobPostingState(str, enum.Enum):
+    draft = "draft"
+    active = "active"
+    closed = "closed"
+
+
+class QuestionType(str, enum.Enum):
+    text = "text"
+    mcq = "mcq"
+    file = "file"
 
 
 # ORM models
@@ -135,6 +147,8 @@ class User(Base):
     resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
     # Jobs posted by company users
     jobs = relationship("Job", back_populates="company", cascade="all, delete-orphan")
+    # Job postings (more detailed postings with application questions)
+    job_postings = relationship("JobPosting", back_populates="company", cascade="all, delete-orphan")
 
 
 class Token(Base):
@@ -311,6 +325,79 @@ class Job(Base):
     __table_args__ = (
         Index('idx_jobs_company_id', 'company_id'),
         Index('idx_jobs_status', 'status'),
+    )
+
+
+# New JobPosting models (detailed postings + application questions)
+class JobPosting(Base):
+    __tablename__ = "job_postings"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    state = Column(SAEnum(JobPostingState, name="job_posting_state"), nullable=False, server_default=JobPostingState.draft.value)
+    title = Column(String(512), nullable=False)
+    description = Column(Text, nullable=False)
+    location = Column(Text, nullable=True)
+    employment_type = Column(Text, nullable=True)
+    seniority = Column(Text, nullable=True)
+    salary_min = Column(Integer, nullable=True)
+    salary_max = Column(Integer, nullable=True)
+    currency = Column(String(3), nullable=True)
+    remote_policy = Column(Text, nullable=True)
+    deadline = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+
+    company = relationship("User", back_populates="job_postings")
+    questions = relationship("JobPostingQuestion", back_populates="job_posting", cascade="all, delete-orphan", order_by="JobPostingQuestion.position")
+
+    __table_args__ = (
+        Index('idx_job_postings_company_id', 'company_id'),
+        Index('idx_job_postings_state', 'state'),
+        CheckConstraint(
+            "state IN ('draft','active','closed')",
+            name='chk_job_postings_state_allowed'
+        ),
+    )
+
+
+class JobPostingQuestion(Base):
+    __tablename__ = "job_posting_questions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    job_posting_id = Column(String(36), ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False)
+    type = Column(SAEnum(QuestionType, name="job_posting_question_type"), nullable=False)
+    prompt = Column(Text, nullable=False)
+    is_required = Column(Boolean, nullable=False, server_default="false")
+    position = Column(Integer, nullable=False, server_default="0")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    job_posting = relationship("JobPosting", back_populates="questions")
+    options = relationship("JobPostingQuestionOption", back_populates="question", cascade="all, delete-orphan", order_by="JobPostingQuestionOption.position")
+
+    __table_args__ = (
+        Index('idx_job_posting_questions_job_posting_id', 'job_posting_id'),
+        UniqueConstraint('job_posting_id', 'position', name='uq_job_posting_questions_job_posting_id_position'),
+    )
+
+
+class JobPostingQuestionOption(Base):
+    __tablename__ = "job_posting_question_options"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    question_id = Column(String(36), ForeignKey("job_posting_questions.id", ondelete="CASCADE"), nullable=False)
+    label = Column(Text, nullable=False)
+    position = Column(Integer, nullable=False, server_default="0")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    question = relationship("JobPostingQuestion", back_populates="options")
+
+    __table_args__ = (
+        Index('idx_job_posting_question_options_question_id', 'question_id'),
+        UniqueConstraint('question_id', 'position', name='uq_job_posting_question_options_question_id_position'),
     )
 
 

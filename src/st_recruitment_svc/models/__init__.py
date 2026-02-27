@@ -9,4 +9,8 @@ from .base import (
     JobSeekerProfile,
     Resume,
     CompanyProfile,
+    Job,
+    JobPosting,
+    JobPostingQuestion,
+    JobPostingQuestionOption,
 )
