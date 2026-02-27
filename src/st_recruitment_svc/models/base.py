@@ -52,8 +52,9 @@ class UserStatus(str, enum.Enum):
 
 
 class TokenType(str, enum.Enum):
-    verify = "verify"
-    reset = "reset"
+    # Align enum values with spec: email_verification and password_reset
+    email_verification = "email_verification"
+    password_reset = "password_reset"
     download = "download"
 
 
@@ -76,6 +77,13 @@ class User(Base):
     failed_login_count = Column(Integer, nullable=False, server_default="0")
     locked_until = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # updated_at is useful for last-modified semantics
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # Company-specific optional metadata (nullable, only used when role==company)
+    company_name = Column(String(255), nullable=True)
+    business_registration_number = Column(String(255), nullable=True)
+    contact_information = Column(JSON, nullable=True)
 
     tokens = relationship("Token", back_populates="user", cascade="all, delete-orphan")
     file_objects = relationship("FileObject", back_populates="owner", cascade="all, delete-orphan")
@@ -92,6 +100,8 @@ class Token(Base):
     type = Column(SAEnum(TokenType, name="token_type"), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     used_at = Column(DateTime(timezone=True), nullable=True)
+    # created_at to track issuance time for tokens
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user = relationship("User", back_populates="tokens")
 
