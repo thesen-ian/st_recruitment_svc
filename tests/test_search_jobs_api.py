@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from st_recruitment_svc.models.base import (
     JobPosting,
     JobPostingState,
 )
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 
@@ -15,9 +15,11 @@ def test_no_q_returns_active_ordered(client, db_session):
     j_old = JobPosting(company_id="c1", state=JobPostingState.active, title="Old", description="x")
     j_new = JobPosting(company_id="c1", state=JobPostingState.active, title="New", description="x")
     j_draft = JobPosting(company_id="c1", state=JobPostingState.draft, title="Draft", description="x")
-    # adjust created_at to control ordering
-    j_old.created_at = now - timedelta(days=2)
+
+    # set deterministic timestamps so ordering is predictable
+    j_old.created_at = datetime.fromtimestamp(0, tz=timezone.utc)
     j_new.created_at = now
+
     db_session.add_all([j_old, j_new, j_draft])
     db_session.commit()
 
@@ -51,8 +53,19 @@ def test_postgres_fts_sql_generation_contains_operators():
 
     stmt, rank_expr, use_fts = _build_search_statement(q="python developer", page=1, dialect_name="postgresql")
     compiled = str(stmt.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": False}))
+    # must contain the FTS match operator and tsquery function
     assert "@@" in compiled
     assert "websearch_to_tsquery" in compiled or "plainto_tsquery" in compiled
+    # must include a rank function
+    assert "ts_rank_cd" in compiled or "ts_rank" in compiled
+    # when using postgres FTS branch, the compiled SQL should not use ILIKE/LIKE
+    assert "ILIKE" not in compiled.upper()
+    assert " LIKE " not in compiled.upper()
+    # ordering should include rank desc, created_at desc, id desc in that order
+    order_by_section = compiled.upper().split("ORDER BY")[-1]
+    assert "RANK" in order_by_section
+    assert "CREATED_AT" in order_by_section
+    assert "ID" in order_by_section
 
 
 def test_filters_anded_location_and_job_type(client, db_session):
@@ -110,4 +123,29 @@ def test_skills_param_ignored_when_no_schema_field(client, db_session):
     resp = client.get("/api/search/jobs", params={"skills": "python,sql"})
     assert resp.status_code == 200
     # since no skills field, it behaves like no filter and returns the job
-    assert any(it["title"] == "S1" for it in resp.json()["items"]) 
+    assert any(it["title"] == "S1" for it in resp.json()["items"])
+
+
+def test_stable_ordering_with_identical_created_at(client, db_session):
+    # Seed three active jobs with identical created_at timestamps
+    ts = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    a = JobPosting(company_id="c7", state=JobPostingState.active, title="T1", description="x")
+    b = JobPosting(company_id="c7", state=JobPostingState.active, title="T2", description="x")
+    c = JobPosting(company_id="c7", state=JobPostingState.active, title="T3", description="x")
+    for obj in (a, b, c):
+        obj.created_at = ts
+    db_session.add_all([a, b, c])
+    db_session.commit()
+
+    # Call the API
+    resp = client.get("/api/search/jobs")
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+
+    # Query the DB directly using the expected ordering to build expected sequence
+    stmt = select(JobPosting).where(JobPosting.state == JobPostingState.active).order_by(JobPosting.created_at.desc(), JobPosting.id.desc())
+    res = db_session.execute(stmt).scalars().all()
+    expected_ids = [r.id for r in res if r.title in {"T1", "T2", "T3"}]
+    returned_ids = [it["id"] for it in items if it["title"] in {"T1", "T2", "T3"}]
+
+    assert returned_ids == expected_ids
