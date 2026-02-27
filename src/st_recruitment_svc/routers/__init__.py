@@ -246,6 +246,10 @@ try:
 except Exception:
     logger.debug("Job seekers router not available during import")
 
+# Include search router
+from . import search
+router.include_router(search.router)
+
 # Include companies router
 # Import errors should not be silently swallowed to avoid missing routes during tests.
 from . import companies
