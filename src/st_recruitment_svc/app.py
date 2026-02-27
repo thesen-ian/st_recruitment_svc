@@ -26,6 +26,7 @@ def _error_envelope(error_type: str, message: str, details: Optional[List[Any]] 
     return payload
 
 
+# Use a plain FastAPI app. Avoid making unrelated router customizations
 app = FastAPI(debug=True)
 
 # Mount all API routes under a single router at /api
