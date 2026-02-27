@@ -18,6 +18,7 @@ httpx = "^0.28.1"
 bcrypt = "^5.0.0"
 pyjwt = "^2.11.0"
 apscheduler = "^3.11.2"
+python-multipart = "^0.0.22"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"

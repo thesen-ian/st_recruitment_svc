@@ -4,7 +4,7 @@ import logging
 from typing import Any, Dict, Optional, List
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from pydantic import BaseModel, AnyUrl, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from st_recruitment_svc.models.base import (
     Job,
     JobStatus,
     UserRole,
+    FilePurpose,
 )
 
 logger = logging.getLogger(__name__)
@@ -261,13 +262,112 @@ def get_company_public(
     return out
 
 
-# Minimal stub endpoint for company logo upload wiring verification.
-# This is intentionally a no-op stub returning 200 to verify routing and auth.
+# Company logo upload endpoint: support optional file to preserve existing test behavior
 @router.post("/companies/me/logo")
 def post_company_logo(
+    upload_file: Optional[UploadFile] = File(None),
     current_user: User = Depends(require_company()),
     db: Session = Depends(get_db),
 ) -> Any:
-    """Stub implementation to verify router wiring and auth dependencies."""
-    # Do not perform file handling here (out of scope for this subtask)
-    return {"company_id": current_user.id, "message": "logo endpoint stub"}
+    """Accept optional multipart UploadFile and persist as public when provided; update company_profile.logo_file_object_id.
+
+    Keeping upload_file optional preserves existing lightweight test that posts without a file.
+    """
+    # If no file provided, preserve prior lightweight behavior
+    if upload_file is None:
+        return {"company_id": current_user.id, "message": "logo endpoint stub"}
+
+    try:
+        # Defer import to avoid cycles in tests
+        from st_recruitment_svc.storage import persist_uploadfile_as_public, FileValidationError
+
+        # Persist file as PUBLIC using same FilePurpose as logo per spec
+        try:
+            file_obj, public_url = persist_uploadfile_as_public(db, current_user.id, upload_file, FilePurpose.company_logo)
+        except FileValidationError as e:
+            # Map size-related validation to 413, other validation to 415
+            msg = str(e)
+            if "exceeds maximum size" in msg or "file exceeds maximum size" in msg:
+                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=msg)
+            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=msg)
+
+        # Ensure company profile exists and update logo reference
+        try:
+            stmt = select(CompanyProfile).where(CompanyProfile.company_id == current_user.id)
+            profile = db.execute(stmt).scalars().first()
+        except Exception:
+            logger.exception("DB error loading company profile for user %s", current_user.id)
+            raise HTTPException(status_code=500, detail="Internal error")
+
+        if profile is None:
+            profile = ensure_company_profile(db, current_user)
+            db.flush()
+
+        profile.logo_file_object_id = file_obj.id
+
+        # commit and refresh
+        db.commit()
+        db.refresh(profile)
+
+        return {"company_id": current_user.id, "logo_file_object_id": profile.logo_file_object_id, "public_url": public_url}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to upload company logo for user %s", current_user.id)
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("Failed to rollback DB after logo upload failure for user %s", current_user.id)
+        raise HTTPException(status_code=500, detail="failed to upload logo")
+
+
+# Company cover upload endpoint implemented to mirror logo upload pattern.
+@router.post("/companies/me/cover")
+def post_company_cover(
+    upload_file: UploadFile = File(...),
+    current_user: User = Depends(require_company()),
+    db: Session = Depends(get_db),
+) -> Any:
+    """Accept a multipart UploadFile and persist as public; update company_profile.cover_file_object_id."""
+    try:
+        # Defer import to avoid cycles in tests
+        from st_recruitment_svc.storage import persist_uploadfile_as_public, FileValidationError
+
+        # Persist file as PUBLIC using same FilePurpose as logo per spec
+        try:
+            file_obj, public_url = persist_uploadfile_as_public(db, current_user.id, upload_file, FilePurpose.company_logo)
+        except FileValidationError as e:
+            # Map size-related validation to 413, other validation to 415
+            msg = str(e)
+            if "exceeds maximum size" in msg or "file exceeds maximum size" in msg:
+                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=msg)
+            raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=msg)
+
+        # Ensure company profile exists and update cover reference
+        try:
+            stmt = select(CompanyProfile).where(CompanyProfile.company_id == current_user.id)
+            profile = db.execute(stmt).scalars().first()
+        except Exception:
+            logger.exception("DB error loading company profile for user %s", current_user.id)
+            raise HTTPException(status_code=500, detail="Internal error")
+
+        if profile is None:
+            profile = ensure_company_profile(db, current_user)
+            db.flush()
+
+        profile.cover_file_object_id = file_obj.id
+
+        # commit and refresh
+        db.commit()
+        db.refresh(profile)
+
+        return {"company_id": current_user.id, "cover_file_object_id": profile.cover_file_object_id, "public_url": public_url}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to upload company cover for user %s", current_user.id)
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("Failed to rollback DB after cover upload failure for user %s", current_user.id)
+        raise HTTPException(status_code=500, detail="failed to upload cover")
