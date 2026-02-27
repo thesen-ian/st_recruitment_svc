@@ -37,21 +37,24 @@ Base = declarative_base()
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine)
 
-# Use JSONB only when the runtime engine is Postgres. Fall back to generic JSON otherwise.
-# Relying on availability of dialect classes is incorrect; check engine dialect instead.
+# Use JSONB and TSVECTOR only when the runtime engine is Postgres. Fall back to portable types otherwise.
 try:
     if engine.dialect.name == "postgresql":
         from sqlalchemy.dialects.postgresql import JSONB  # type: ignore
+        from sqlalchemy.dialects.postgresql import TSVECTOR  # type: ignore
 
         JSON_TYPE = JSONB
         JSON_SERVER_DEFAULT = sa_text("'[]'::jsonb")
+        TSVECTOR_TYPE = TSVECTOR
     else:
         JSON_TYPE = JSON
         JSON_SERVER_DEFAULT = '[]'
+        TSVECTOR_TYPE = Text
 except Exception:
-    # Be defensive: if anything unexpected happens, fall back to JSON portable type
+    # Be defensive: if anything unexpected happens, fall back to portable types
     JSON_TYPE = JSON
     JSON_SERVER_DEFAULT = '[]'
+    TSVECTOR_TYPE = Text
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -345,6 +348,11 @@ class JobPosting(Base):
     currency = Column(String(3), nullable=True)
     remote_policy = Column(Text, nullable=True)
     deadline = Column(DateTime(timezone=True), nullable=True)
+
+    # Denormalized company_name to be populated by application when persisting postings
+    company_name = Column(String(255), nullable=True)
+    # search_document stores computed tsvector on Postgres; portable Text on other DBs
+    search_document = Column(TSVECTOR_TYPE, nullable=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
