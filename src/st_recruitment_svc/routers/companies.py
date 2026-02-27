@@ -259,3 +259,15 @@ def get_company_public(
     }
 
     return out
+
+
+# Minimal stub endpoint for company logo upload wiring verification.
+# This is intentionally a no-op stub returning 200 to verify routing and auth.
+@router.post("/companies/me/logo")
+def post_company_logo(
+    current_user: User = Depends(require_company()),
+    db: Session = Depends(get_db),
+) -> Any:
+    """Stub implementation to verify router wiring and auth dependencies."""
+    # Do not perform file handling here (out of scope for this subtask)
+    return {"company_id": current_user.id, "message": "logo endpoint stub"}
