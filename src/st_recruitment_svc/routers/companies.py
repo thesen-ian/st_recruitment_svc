@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Body
 from pydantic import BaseModel, AnyUrl, Field, validator
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from st_recruitment_svc.auth import require_company, get_current_user
 from st_recruitment_svc.models.base import (
@@ -458,6 +458,47 @@ def _serialize_job(job: JobPosting) -> Dict[str, Any]:
         "closed_at": job.closed_at.isoformat() if getattr(job, "closed_at", None) is not None else None,
         "questions": questions_out,
     }
+
+
+# Public job detail endpoint
+@router.get("/jobs/{job_id}", response_model=JobPostingOut)
+def get_public_job(job_id: str, db: Session = Depends(get_db)) -> Any:
+    try:
+        stmt = (
+            select(JobPosting)
+            .options(selectinload(JobPosting.questions).selectinload(JobPostingQuestion.options))
+            .where(JobPosting.id == job_id)
+        )
+        job = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading job %s", job_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    # Do not leak non-active jobs
+    if job is None or job.state != JobPostingState.active:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+
+    return _serialize_job(job)
+
+
+# Company jobs listing for authenticated company users (manage view)
+@router.get("/companies/me/jobs", response_model=List[JobPostingOut])
+def get_my_company_jobs(
+    current_user: User = Depends(require_company()), db: Session = Depends(get_db)
+) -> Any:
+    try:
+        stmt = (
+            select(JobPosting)
+            .options(selectinload(JobPosting.questions).selectinload(JobPostingQuestion.options))
+            .where(JobPosting.company_id == current_user.id)
+            .order_by(JobPosting.updated_at.desc())
+        )
+        jobs = db.execute(stmt).scalars().all()
+    except Exception:
+        logger.exception("DB error loading jobs for company %s", current_user.id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    return [_serialize_job(j) for j in jobs]
 
 
 @router.post("/jobs", response_model=JobPostingOut, status_code=status.HTTP_201_CREATED)
