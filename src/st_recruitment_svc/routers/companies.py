@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,6 +15,9 @@ from st_recruitment_svc.models.base import (
     User,
     get_db,
     ensure_company_profile,
+    Job,
+    JobStatus,
+    UserRole,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,8 +36,6 @@ class CompanyProfileIn(BaseModel):
 
 class CompanyProfileOut(CompanyProfileIn):
     # Override website_url to plain string to avoid Pydantic AnyUrl normalization
-    # which can change formatting (e.g. append trailing slash). We validate input
-    # with AnyUrl but return a stable string representation.
     website_url: Optional[str] = None
 
     id: str
@@ -46,6 +47,30 @@ class CompanyProfileOut(CompanyProfileIn):
     cover_file_object_id: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
+
+
+# Public-facing job summary for listings. Keep fields intentionally small.
+class JobSummary(BaseModel):
+    id: str
+    title: str
+    created_at: Optional[str]
+
+
+# Public company profile response. Excludes sensitive fields like contact_information and BRN.
+class CompanyPublicOut(BaseModel):
+    id: str
+    company_id: str
+    company_name: Optional[str]
+    description: Optional[str]
+    website_url: Optional[str]
+    industry: Optional[str]
+    size: Optional[str]
+    hq_location: Optional[str]
+    logo_file_object_id: Optional[str]
+    cover_file_object_id: Optional[str]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    active_job_postings: List[JobSummary] = []
 
 
 def _serialize(company_profile: CompanyProfile, company_user: User) -> Dict[str, Any]:
@@ -156,3 +181,81 @@ def upsert_my_company(
         raise HTTPException(status_code=500, detail="failed to save profile")
 
     return _serialize(profile, current_user)
+
+
+@router.get("/companies/{company_id}", response_model=CompanyPublicOut)
+def get_company_public(
+    company_id: str,
+    db: Session = Depends(get_db),
+) -> Any:
+    """Public company profile view including active job postings. No auth required.
+
+    This endpoint intentionally excludes sensitive fields such as contact_information
+    and business_registration_number from the public response.
+    """
+    try:
+        stmt = select(User).where(User.id == company_id)
+        company_user = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading user %s", company_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    # Simple, deterministic check: user must exist and have company role
+    if company_user is None or company_user.role != UserRole.company:
+        # Do not reveal whether a user exists with a different role
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="company not found")
+
+    # Load or ensure profile
+    try:
+        stmt = select(CompanyProfile).where(CompanyProfile.company_id == company_user.id)
+        profile = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading company profile for user %s", company_user.id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if profile is None:
+        # Create profile for legacy users; commit so it persists for future requests
+        try:
+            profile = ensure_company_profile(db, company_user)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to ensure company profile for user %s", company_user.id)
+            raise HTTPException(status_code=500, detail="Internal error")
+        # reload
+        try:
+            stmt = select(CompanyProfile).where(CompanyProfile.company_id == company_user.id)
+            profile = db.execute(stmt).scalars().first()
+        except Exception:
+            logger.exception("Failed to reload created company profile for user %s", company_user.id)
+            raise HTTPException(status_code=500, detail="Internal error")
+
+    # Fetch active job postings for this company. Active == published.
+    try:
+        jobs_stmt = select(Job).where(Job.company_id == company_user.id, Job.status == JobStatus.published).order_by(Job.created_at.desc())
+        jobs = db.execute(jobs_stmt).scalars().all()
+    except Exception:
+        logger.exception("DB error loading jobs for company %s", company_user.id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    job_summaries = []
+    for j in jobs:
+        job_summaries.append(JobSummary(id=j.id, title=j.title, created_at=j.created_at.isoformat() if getattr(j, 'created_at', None) is not None else None))
+
+    out = {
+        "id": profile.id,
+        "company_id": profile.company_id,
+        "company_name": getattr(company_user, "company_name", None),
+        "description": profile.description,
+        "website_url": profile.website_url,
+        "industry": profile.industry,
+        "size": profile.size,
+        "hq_location": profile.hq_location,
+        "logo_file_object_id": profile.logo_file_object_id,
+        "cover_file_object_id": profile.cover_file_object_id,
+        "created_at": profile.created_at.isoformat() if getattr(profile, 'created_at', None) is not None else None,
+        "updated_at": profile.updated_at.isoformat() if getattr(profile, 'updated_at', None) is not None else None,
+        "active_job_postings": job_summaries,
+    }
+
+    return out

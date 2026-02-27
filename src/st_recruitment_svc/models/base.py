@@ -94,6 +94,13 @@ class FilePurpose(str, enum.Enum):
     application_answer = "application_answer"
 
 
+# Job status enum for job postings. Keep values minimal and conventional.
+class JobStatus(str, enum.Enum):
+    draft = "draft"
+    published = "published"
+    closed = "closed"
+
+
 # ORM models
 class User(Base):
     __tablename__ = "users"
@@ -126,6 +133,8 @@ class User(Base):
     company_profile = relationship("CompanyProfile", back_populates="company", uselist=False, cascade="all, delete-orphan")
     # Resumes owned by user
     resumes = relationship("Resume", back_populates="user", cascade="all, delete-orphan")
+    # Jobs posted by company users
+    jobs = relationship("Job", back_populates="company", cascade="all, delete-orphan")
 
 
 class Token(Base):
@@ -282,6 +291,26 @@ class Resume(Base):
     __table_args__ = (
         Index('idx_resumes_user_id', 'user_id'),
         UniqueConstraint('file_object_id', name='uq_resumes_file_object_id'),
+    )
+
+
+# Job postings model used for public listings. Keep schema minimal and suitable for public consumption.
+class Job(Base):
+    __tablename__ = "jobs"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    company_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title = Column(String(512), nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(SAEnum(JobStatus, name="job_status"), nullable=False, server_default=JobStatus.draft.value)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    company = relationship("User", back_populates="jobs")
+
+    __table_args__ = (
+        Index('idx_jobs_company_id', 'company_id'),
+        Index('idx_jobs_status', 'status'),
     )
 
 
