@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import enum
 import uuid
-from typing import Generator
+from typing import Generator, Iterable, Any
 
 from sqlalchemy import (
     BigInteger,
@@ -21,11 +21,15 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
     text as sa_text,
+    select,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, scoped_session, sessionmaker, Session
 
 from st_recruitment_svc.config import DATABASE_URL
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Base declarative metadata used by alembic env.py
 Base = declarative_base()
@@ -279,3 +283,55 @@ class Resume(Base):
         Index('idx_resumes_user_id', 'user_id'),
         UniqueConstraint('file_object_id', name='uq_resumes_file_object_id'),
     )
+
+
+# Helper to ensure a CompanyProfile exists for a given company user within the same session.
+def ensure_company_profile(session: Session, user: User) -> CompanyProfile:
+    """Ensure a CompanyProfile exists for user. Idempotent: returns existing profile if present.
+
+    This helper performs a SELECT to detect an existing profile and only adds a new
+    CompanyProfile when none is present. It deliberately does not commit or flush
+    so callers can coordinate transactional behavior.
+    """
+    try:
+        if user.role != UserRole.company:
+            raise ValueError("ensure_company_profile called for non-company user")
+
+        # Check if a profile already exists in the current session or DB
+        stmt = select(CompanyProfile).where(CompanyProfile.company_id == user.id)
+        existing = session.execute(stmt).scalars().first()
+        if existing:
+            return existing
+
+        profile = CompanyProfile(company_id=user.id)
+        session.add(profile)
+        # Do not flush here; allow caller's transaction flow to manage flush/commit
+        return profile
+    except Exception as e:
+        logger.error("Failed to ensure company profile for user %s: %s", getattr(user, 'id', None), e, exc_info=True)
+        raise
+
+
+def create_user(session: Session, email: str, password_hash: str, role: UserRole, **kwargs: Any) -> User:
+    """Create a User and associated CompanyProfile when role==company.
+
+    This function performs inserts and flushes within the provided Session so the
+    caller can control transaction boundaries (commit/rollback). It is explicit
+    and avoids global Session event listeners.
+    """
+    try:
+        user = User(email=email, password_hash=password_hash, role=role, **kwargs)
+        session.add(user)
+        # Flush to ensure DB-side constraints and assign any defaults
+        session.flush()
+
+        if role == UserRole.company:
+            # Ensure profile exists; ensure_company_profile is idempotent
+            ensure_company_profile(session, user)
+            # Flush profile so that it is persisted in the same transaction
+            session.flush()
+
+        return user
+    except Exception as e:
+        logger.error("Failed to create user (email=%s role=%s): %s", email, role, e, exc_info=True)
+        raise
