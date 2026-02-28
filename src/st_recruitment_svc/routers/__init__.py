@@ -240,17 +240,17 @@ def download_private_file(
     return StreamingResponse(fp, media_type=fo.content_type or "application/octet-stream", headers=headers)
 
 # Include job_seekers router to aggregate routes
-try:
-    from . import job_seekers
-    router.include_router(job_seekers.router)
-except Exception:
-    logger.debug("Job seekers router not available during import")
+from . import job_seekers
+router.include_router(job_seekers.router)
 
 # Include search router
 from . import search
 router.include_router(search.router)
 
 # Include companies router
-# Import errors should not be silently swallowed to avoid missing routes during tests.
 from . import companies
 router.include_router(companies.router)
+
+# Include new applications router (do not swallow import errors)
+from . import applications
+router.include_router(applications.router)
