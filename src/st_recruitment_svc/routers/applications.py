@@ -4,13 +4,13 @@ import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, model_validator, field_validator, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
-from st_recruitment_svc.auth import get_current_user, require_job_seeker
+from st_recruitment_svc.auth import get_current_user, require_job_seeker, require_company
 from st_recruitment_svc.models.base import (
     get_db,
     JobPosting,
@@ -27,6 +27,8 @@ from st_recruitment_svc.models.base import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+PAGE_SIZE = 20
 
 
 class AnswerIn(BaseModel):
@@ -245,3 +247,103 @@ def apply_to_job(
     applied_at = app_row.applied_at.isoformat() if getattr(app_row, "applied_at", None) is not None else datetime.now(tz=timezone.utc).isoformat()
     resp = ApplyResponse(application_id=app_row.id, status=app_row.status, applied_at=applied_at)
     return resp.model_dump() if hasattr(resp, "model_dump") else resp.dict()
+
+
+# ----------------- Listing endpoints -----------------
+@router.get("/job-seekers/me/applications")
+def list_my_applications(
+    page: int = Query(1, ge=1),
+    current_user = Depends(require_job_seeker()),
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        offset = (page - 1) * PAGE_SIZE
+        stmt = (
+            select(Application)
+            .where(Application.job_seeker_user_id == current_user.id)
+            .order_by(Application.applied_at.desc(), Application.id.desc())
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+        res = db.execute(stmt)
+        apps = res.scalars().all()
+
+        items: List[Dict[str, Any]] = []
+        for a in apps:
+            items.append(
+                {
+                    "application_id": a.id,
+                    "job_id": a.job_id,
+                    "selected_resume_id": a.selected_resume_id,
+                    "status": a.status,
+                    "applied_at": a.applied_at.isoformat() if getattr(a, "applied_at", None) is not None else None,
+                }
+            )
+
+        return {"items": items, "page": page, "page_size": PAGE_SIZE}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to list applications for job seeker %s", getattr(current_user, "id", None))
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
+@router.get("/companies/me/applications")
+def list_company_applications(
+    job_id: Optional[str] = Query(None),
+    app_status: Optional[str] = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    current_user = Depends(require_company()),
+    db: Session = Depends(get_db),
+) -> Any:
+    try:
+        # If job_id provided, verify ownership first
+        if job_id is not None:
+            try:
+                job_stmt = select(JobPosting).where(JobPosting.id == job_id)
+                job = db.execute(job_stmt).scalars().first()
+            except Exception:
+                logger.exception("DB error loading job %s for ownership check", job_id)
+                raise HTTPException(status_code=500, detail="Internal error")
+
+            if job is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job not found")
+            if job.company_id != current_user.id:
+                # Consistent with other owner checks: 403 when resource exists but not owned
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not owner of job")
+
+        # Base query: join to JobPosting to enforce tenant scoping
+        stmt = select(Application).join(JobPosting, JobPosting.id == Application.job_id).where(JobPosting.company_id == current_user.id)
+
+        if job_id is not None:
+            stmt = stmt.where(Application.job_id == job_id)
+        if app_status is not None:
+            stmt = stmt.where(Application.status == app_status)
+
+        stmt = stmt.order_by(Application.applied_at.desc(), Application.id.desc())
+
+        offset = (page - 1) * PAGE_SIZE
+        stmt = stmt.offset(offset).limit(PAGE_SIZE)
+
+        res = db.execute(stmt)
+        apps = res.scalars().all()
+
+        items: List[Dict[str, Any]] = []
+        for a in apps:
+            items.append(
+                {
+                    "application_id": a.id,
+                    "job_id": a.job_id,
+                    "job_seeker_user_id": a.job_seeker_user_id,
+                    "selected_resume_id": a.selected_resume_id,
+                    "status": a.status,
+                    "applied_at": a.applied_at.isoformat() if getattr(a, "applied_at", None) is not None else None,
+                }
+            )
+
+        return {"items": items, "page": page, "page_size": PAGE_SIZE}
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to list applications for company %s", getattr(current_user, "id", None))
+        raise HTTPException(status_code=500, detail="Internal error")
