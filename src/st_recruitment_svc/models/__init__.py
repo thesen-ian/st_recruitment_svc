@@ -15,4 +15,6 @@ from .base import (
     JobPostingQuestionOption,
     Application,
     ApplicationAnswer,
+    ApplicationStatusHistory,
+    ApplicationNote,
 )

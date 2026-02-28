@@ -458,6 +458,40 @@ class ApplicationAnswer(Base):
     )
 
 
+# New models: application status history and company-only application notes
+class ApplicationStatusHistory(Base):
+    __tablename__ = "application_status_history"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    application_id = Column(String(36), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    from_status = Column(SAEnum(ApplicationStatus, name="application_status"), nullable=True)
+    to_status = Column(SAEnum(ApplicationStatus, name="application_status"), nullable=False)
+    changed_by_user_id = Column(String(36), nullable=False)
+    changed_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    notes = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # Ensure index sorts by changed_at DESC for newest-first queries
+        Index('idx_application_status_history_application_id_changed_at', 'application_id', sa_text('changed_at DESC')),
+        Index('idx_application_status_history_application_id', 'application_id'),
+    )
+
+
+class ApplicationNote(Base):
+    __tablename__ = "application_notes"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    application_id = Column(String(36), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    note_text = Column(Text, nullable=False)
+    created_by_user_id = Column(String(36), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        # Ensure index sorts by created_at DESC for newest-first queries
+        Index('idx_application_notes_application_id_created_at', 'application_id', sa_text('created_at DESC')),
+    )
+
+
 # Helper to ensure a CompanyProfile exists for a given company user within the same session.
 def ensure_company_profile(session: Session, user: User) -> CompanyProfile:
     """Ensure a CompanyProfile exists for user. Idempotent: returns existing profile if present.
