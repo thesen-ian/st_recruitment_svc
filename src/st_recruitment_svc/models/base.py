@@ -119,6 +119,17 @@ class QuestionType(str, enum.Enum):
 # Application-specific enums
 class ApplicationStatus(str, enum.Enum):
     Applied = "Applied"
+    ResumeReview = "Resume Review"
+    PhoneScreen = "Phone Screen"
+    InterviewScheduled = "Interview Scheduled"
+    InterviewComplete = "Interview Complete"
+    FinalReview = "Final Review"
+    Offer = "Offer"
+    Rejected = "Rejected"
+
+    def __str__(self) -> str:
+        # Ensure str(enum_member) yields the human-friendly value used across the DB and API
+        return self.value
 
 
 # ORM models

@@ -24,6 +24,8 @@ from st_recruitment_svc.models.base import (
     ApplicationAnswer,
     Visibility,
     UserRole,
+    ApplicationStatus,
+    ApplicationStatusHistory,
 )
 
 logger = logging.getLogger(__name__)
@@ -443,3 +445,163 @@ def get_application_detail(
     }
 
     return result
+
+
+# ----------------- Status transition endpoint -----------------
+class StatusChangeRequest(BaseModel):
+    to_status: str
+    notes: Optional[str] = None
+    # Optional interview scheduling details to validate when scheduling
+    interview_at: Optional[datetime] = None
+    interview_end: Optional[datetime] = None
+
+    @model_validator(mode="after")
+    def validate_interview_times(cls, model: "StatusChangeRequest") -> "StatusChangeRequest":
+        # If interview_end provided ensure interview_at exists and end > start
+        if model.interview_end is not None and model.interview_at is None:
+            raise ValueError("interview_at required when interview_end provided")
+        if model.interview_at is not None and model.interview_at.tzinfo is None:
+            # enforce timezone-aware datetimes
+            raise ValueError("interview_at must be timezone-aware")
+        if model.interview_end is not None and model.interview_end.tzinfo is None:
+            raise ValueError("interview_end must be timezone-aware")
+        if model.interview_at is not None and model.interview_end is not None:
+            if model.interview_end <= model.interview_at:
+                raise ValueError("interview_end must be after interview_at")
+        return model
+
+
+class StatusChangeResponse(BaseModel):
+    application_id: str
+    status: str
+    updated_at: Optional[str] = None
+
+
+@router.post("/applications/{application_id}/status", response_model=StatusChangeResponse)
+def change_application_status(
+    application_id: str,
+    payload: StatusChangeRequest,
+    current_user = Depends(require_company()),
+    db: Session = Depends(get_db),
+) -> Any:
+    # Only company actors may call; require_company dependency enforces role
+    try:
+        stmt = select(Application).where(Application.id == application_id)
+        app_row = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if app_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="application not found")
+
+    # verify ownership via JobPosting
+    try:
+        job_stmt = select(JobPosting).where(JobPosting.id == app_row.job_id)
+        job = db.execute(job_stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading job for application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if job is None or getattr(job, "company_id", None) != current_user.id:
+        # Either job not found or not owned by this company
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not owner of application")
+
+    # Determine current and target statuses
+    def _val(s):
+        # normalize enum or string to string value
+        try:
+            import enum as _enum
+            if isinstance(s, _enum.Enum):
+                return s.value
+        except Exception:
+            pass
+        return str(s) if s is not None else None
+
+    current_status = _val(getattr(app_row, "status", None))
+    to_status = payload.to_status
+
+    # Define allowed linear flow
+    flow = [
+        ApplicationStatus.Applied.value,
+        ApplicationStatus.ResumeReview.value,
+        ApplicationStatus.PhoneScreen.value,
+        ApplicationStatus.InterviewScheduled.value,
+        ApplicationStatus.InterviewComplete.value,
+        ApplicationStatus.FinalReview.value,
+        ApplicationStatus.Offer.value,
+        ApplicationStatus.Rejected.value,
+    ]
+
+    # Terminal protection
+    if current_status in (ApplicationStatus.Offer.value, ApplicationStatus.Rejected.value):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="cannot transition from terminal status")
+
+    # Must be a known to_status
+    if to_status not in flow:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unknown target status")
+
+    # Validate forward-only single-step transitions
+    try:
+        curr_idx = flow.index(current_status)
+    except ValueError:
+        # if current status unknown, disallow
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="current status invalid")
+
+    # Special case: Final Review can go to Offer or Rejected
+    if current_status == ApplicationStatus.FinalReview.value:
+        if to_status not in (ApplicationStatus.Offer.value, ApplicationStatus.Rejected.value):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid transition from Final Review")
+    else:
+        # normal expected next step
+        expected_idx = curr_idx + 1
+        if expected_idx >= len(flow) or flow[expected_idx] != to_status:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid transition; can only move to next stage")
+
+    # Interview Scheduled specific validation
+    if to_status == ApplicationStatus.InterviewScheduled.value:
+        # require interview_at and it must be in the future
+        if payload.interview_at is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="interview_at required when scheduling interview")
+        now = datetime.now(tz=timezone.utc)
+        if payload.interview_at <= now:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="interview must be scheduled in the future")
+        # if interview_end provided validated by pydantic already
+
+    # Persist status change and history atomically
+    try:
+        from_status_val = current_status
+        app_row.status = to_status
+        # update updated_at if DB doesn't auto-update (keep simple approach)
+        try:
+            app_row.updated_at = datetime.now(tz=timezone.utc)
+        except Exception:
+            pass
+
+        hist = ApplicationStatusHistory(
+            application_id=app_row.id,
+            from_status=from_status_val,
+            to_status=to_status,
+            changed_by_user_id=current_user.id,
+            notes=payload.notes,
+        )
+        db.add(hist)
+        db.add(app_row)
+        db.commit()
+        db.refresh(app_row)
+    except HTTPException:
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("rollback failed after HTTPException in status change")
+        raise
+    except Exception as e:
+        logger.exception("Failed to change status for application %s: %s", application_id, e)
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("rollback failed after exception in status change")
+        raise HTTPException(status_code=500, detail="failed to change status")
+
+    resp = StatusChangeResponse(application_id=app_row.id, status=app_row.status, updated_at=getattr(app_row, "updated_at", None).isoformat() if getattr(app_row, "updated_at", None) is not None else None)
+    return resp.model_dump() if hasattr(resp, "model_dump") else resp.dict()
