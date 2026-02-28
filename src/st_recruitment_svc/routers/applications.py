@@ -26,6 +26,7 @@ from st_recruitment_svc.models.base import (
     UserRole,
     ApplicationStatus,
     ApplicationStatusHistory,
+    ApplicationNote,
 )
 
 logger = logging.getLogger(__name__)
@@ -604,4 +605,85 @@ def change_application_status(
         raise HTTPException(status_code=500, detail="failed to change status")
 
     resp = StatusChangeResponse(application_id=app_row.id, status=app_row.status, updated_at=getattr(app_row, "updated_at", None).isoformat() if getattr(app_row, "updated_at", None) is not None else None)
+    return resp.model_dump() if hasattr(resp, "model_dump") else resp.dict()
+
+
+# ----------------- Company-only application notes endpoint -----------------
+class NoteCreate(BaseModel):
+    note_text: str
+
+    @field_validator("note_text")
+    def non_empty(cls, v: str) -> str:
+        v2 = v.strip()
+        if v2 == "":
+            raise ValueError("note_text must be non-empty")
+        return v2
+
+
+class NoteResponse(BaseModel):
+    id: str
+    application_id: str
+    note_text: str
+    created_by_user_id: str
+    created_at: str
+
+
+@router.post("/applications/{application_id}/notes", response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
+def create_application_note(
+    application_id: str,
+    payload: NoteCreate,
+    current_user = Depends(require_company()),
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    Company-only endpoint to add a private note to an application. Notes are not exposed to job seekers.
+    """
+    try:
+        stmt = select(Application).where(Application.id == application_id)
+        app_row = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if app_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="application not found")
+
+    # verify company ownership via JobPosting
+    try:
+        job_stmt = select(JobPosting).where(JobPosting.id == app_row.job_id)
+        job = db.execute(job_stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading job for application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if job is None or getattr(job, "company_id", None) != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not owner of application")
+
+    # Persist note
+    try:
+        note_row = ApplicationNote(
+            application_id=app_row.id,
+            note_text=payload.note_text,
+            created_by_user_id=current_user.id,
+        )
+        db.add(note_row)
+        db.commit()
+        db.refresh(note_row)
+    except Exception as e:
+        logger.exception("Failed to persist application note for application %s: %s", application_id, e)
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("rollback failed after exception creating application note")
+        raise HTTPException(status_code=500, detail="failed to create note")
+
+    created_at = getattr(note_row, "created_at", None)
+    created_at_s = created_at.isoformat() if created_at is not None else None
+    resp = NoteResponse(
+        id=note_row.id,
+        application_id=note_row.application_id,
+        note_text=note_row.note_text,
+        created_by_user_id=note_row.created_by_user_id,
+        created_at=created_at_s,
+    )
     return resp.model_dump() if hasattr(resp, "model_dump") else resp.dict()
