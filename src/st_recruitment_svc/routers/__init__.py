@@ -247,6 +247,10 @@ router.include_router(job_seekers.router)
 from . import search
 router.include_router(search.router)
 
+# Include public job guard to hide soft-removed legacy jobs before companies router
+from . import public_job_guard
+router.include_router(public_job_guard.router)
+
 # Include companies router
 from . import companies
 router.include_router(companies.router)

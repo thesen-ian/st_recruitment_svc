@@ -7,6 +7,8 @@ from st_recruitment_svc.models.base import (
     User,
     UserRole,
     create_user,
+    Job,
+    JobStatus,
     JobPosting,
     JobPostingQuestion,
     JobPostingQuestionOption,
@@ -92,6 +94,47 @@ def test_public_get_nonexistent_returns_404(client):
     assert r.status_code == 404
 
 
+# Regression test: ensure legacy soft-removed Job is hidden by primary public detail
+def test_public_removed_job_returns_404(client, db_session):
+    # create admin user (also used as company id owner)
+    admin = User(email="adm_pub_rm@example.com", password_hash=hash_password("pass"), role=UserRole.admin)
+    db_session.add(admin)
+    db_session.flush()
+
+    # create legacy Job (published) and corresponding JobPosting with same id
+    job = Job(id=str(uuid.uuid4()), company_id=admin.id, title="Legacy Job", status=JobStatus.published, is_removed=False)
+    db_session.add(job)
+    db_session.flush()
+
+    jp = JobPosting(id=job.id, company_id=admin.id, state=JobPostingState.active, title="PublicPosting", description="desc")
+    db_session.add(jp)
+    db_session.commit()
+
+    token_admin = create_access_token({"sub": admin.id, "role": admin.role.value})
+
+    # Remove the legacy job via admin API
+    r = client.post(f"/api/admin/jobs/{job.id}/remove", headers=auth_header(token_admin))
+    assert r.status_code == 200
+
+    # Public detail should now return 404
+    r2 = client.get(f"/api/jobs/{job.id}")
+    assert r2.status_code == 404
+
+    # Control: create second non-removed legacy job + posting
+    admin2 = User(email="adm2_pub@example.com", password_hash=hash_password("pass"), role=UserRole.admin)
+    db_session.add(admin2)
+    db_session.flush()
+
+    job2 = Job(id=str(uuid.uuid4()), company_id=admin2.id, title="Legacy Job2", status=JobStatus.published, is_removed=False)
+    db_session.add(job2)
+    jp2 = JobPosting(id=job2.id, company_id=admin2.id, state=JobPostingState.active, title="PublicPosting2", description="desc")
+    db_session.add(jp2)
+    db_session.commit()
+
+    r3 = client.get(f"/api/jobs/{job2.id}")
+    assert r3.status_code == 200
+
+
 # Company listing tests
 def test_companies_me_jobs_returns_all_states_and_respects_company_isolation(client, db_session):
     # company A
@@ -142,4 +185,3 @@ def test_companies_me_jobs_auth_required_and_company_role_enforced(client, db_se
     db_session.commit()
     r2 = client.get("/api/companies/me/jobs", headers=auth_header(token))
     assert r2.status_code == 403
-
