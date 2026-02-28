@@ -270,3 +270,7 @@ router.include_router(notification_preferences.router)
 # Include notifications router
 from . import notifications
 router.include_router(notifications.router)
+
+# Include admin router protected by require_admin at router level
+from . import admin
+router.include_router(admin.router)
