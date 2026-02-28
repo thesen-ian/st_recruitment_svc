@@ -412,3 +412,47 @@ def admin_jobs_list(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="failed to list jobs")
+
+
+@router.post("/jobs/{job_id}/remove")
+def admin_job_remove(
+    job_id: str = Path(...),
+    current_admin=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Soft-remove a job (admin-only). Idempotent and writes audit log on success.
+
+    Returns minimal confirmation and guarantees an audit row is created for every successful call.
+    """
+    try:
+        stmt = select(Job).where(Job.id == job_id)
+        job = db.execute(stmt).scalars().first()
+        if job is None:
+            raise HTTPException(status_code=404, detail="job not found")
+
+        prev_removed = bool(getattr(job, "is_removed", False))
+        # Idempotent: only change when not already removed
+        if not prev_removed:
+            job.is_removed = True
+            db.flush()
+
+        details = {"previous_removed": prev_removed, "new_removed": True}
+        write_admin_audit(
+            db,
+            admin_user_id=current_admin.id,
+            action_type="JOB_REMOVE",
+            target_type="job",
+            target_id=job_id,
+            details_json=details,
+        )
+        db.commit()
+        return {"id": job_id, "is_removed": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="failed to remove job")

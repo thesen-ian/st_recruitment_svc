@@ -202,3 +202,73 @@ def test_admin_jobs_list_access_control_and_filters_and_audit(client, db_session
     stmt = select(AdminAuditLog).where(AdminAuditLog.action_type == "JOBS_LIST")
     found = db_session.execute(stmt).scalars().all()
     assert len(found) >= 1
+
+
+# Tests for admin job removal behavior
+
+def test_admin_job_remove_auth_and_behavior_and_audit(client, db_session):
+    admin = User(email="rm_admin@example.com", password_hash="x", role=UserRole.admin, status=UserStatus.active)
+    normal = User(email="rm_normal@example.com", password_hash="x", role=UserRole.job_seeker, status=UserStatus.active)
+    db_session.add_all([admin, normal])
+    db_session.flush()
+
+    job = Job(company_id=admin.id, title="To Remove", status=JobStatus.published, is_removed=False)
+    db_session.add(job)
+    db_session.commit()
+
+    token_admin = create_access_token({"sub": admin.id, "role": admin.role.value})
+    token_normal = create_access_token({"sub": normal.id, "role": normal.role.value})
+
+    # Unauthenticated -> 401
+    r = client.post(f"/api/admin/jobs/{job.id}/remove")
+    assert r.status_code == 401
+
+    # Non-admin -> 403
+    r = client.post(f"/api/admin/jobs/{job.id}/remove", headers=_auth_header(token_normal))
+    assert r.status_code == 403
+
+    # Admin -> remove succeeds
+    r = client.post(f"/api/admin/jobs/{job.id}/remove", headers=_auth_header(token_admin))
+    assert r.status_code == 200
+    data = r.json()
+    assert data["id"] == job.id
+    assert data["is_removed"] is True
+
+    # Verify DB state: expire local session state so we read fresh DB values
+    db_session.expire_all()
+    stmt = select(Job).where(Job.id == job.id)
+    found_job = db_session.execute(stmt).scalars().one()
+    assert bool(found_job.is_removed) is True
+
+    # Audit row exists with expected details
+    stmt = select(AdminAuditLog).where(AdminAuditLog.action_type == "JOB_REMOVE", AdminAuditLog.target_id == job.id)
+    found = db_session.execute(stmt).scalars().all()
+    assert len(found) >= 1
+    last = found[-1]
+    assert last.details_json.get("previous_removed") in (True, False)
+    assert last.details_json.get("new_removed") is True
+
+    # Idempotency: calling again returns 200 and does not flip state
+    r2 = client.post(f"/api/admin/jobs/{job.id}/remove", headers=_auth_header(token_admin))
+    assert r2.status_code == 200
+    data2 = r2.json()
+    assert data2["is_removed"] is True
+
+    # Ensure fresh read for audits
+    db_session.expire_all()
+    # Another audit entry should have been created
+    found_after = db_session.execute(stmt).scalars().all()
+    assert len(found_after) >= 2
+    assert found_after[-1].details_json.get("previous_removed") is True
+    assert found_after[-1].details_json.get("new_removed") is True
+
+
+def test_admin_job_remove_404_when_missing(client, db_session):
+    admin = User(email="rm_admin2@example.com", password_hash="x", role=UserRole.admin, status=UserStatus.active)
+    db_session.add(admin)
+    db_session.commit()
+
+    token_admin = create_access_token({"sub": admin.id, "role": admin.role.value})
+
+    r = client.post(f"/api/admin/jobs/non-existent-id/remove", headers=_auth_header(token_admin))
+    assert r.status_code == 404
