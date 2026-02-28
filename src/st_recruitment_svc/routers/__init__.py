@@ -262,3 +262,7 @@ router.include_router(withdraw.router)
 # Include interviews router
 from . import interviews
 router.include_router(interviews.router)
+
+# Include notification preferences router
+from . import notification_preferences
+router.include_router(notification_preferences.router)
