@@ -561,3 +561,50 @@ def admin_reports_list(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="failed to list reports")
+
+
+@router.post("/reports/{report_id}/resolve")
+def admin_report_resolve(
+    report_id: str = Path(...),
+    current_admin=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Resolve a report idempotently and write an admin audit log.
+
+    Returns 200 on success. If already resolved, operation is idempotent and does not change resolver/time.
+    """
+    try:
+        stmt = select(Report).where(Report.id == report_id)
+        report = db.execute(stmt).scalars().first()
+        if report is None:
+            raise HTTPException(status_code=404, detail="report not found")
+
+        prev_status = report.status
+        # Only modify when transitioning from OPEN -> RESOLVED
+        if prev_status != "RESOLVED":
+            report.status = "RESOLVED"
+            report.resolved_at = datetime.now(tz=timezone.utc)
+            report.resolved_by = current_admin.id
+            # Flush so DB constraints validated and audit can read new values
+            db.flush()
+
+        details = {"previous_status": prev_status, "new_status": report.status}
+        write_admin_audit(
+            db,
+            admin_user_id=current_admin.id,
+            action_type="REPORT_RESOLVE",
+            target_type="report",
+            target_id=report_id,
+            details_json=details,
+        )
+        db.commit()
+        return {"id": report_id, "status": report.status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="failed to resolve report")

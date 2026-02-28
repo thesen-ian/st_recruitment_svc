@@ -105,3 +105,81 @@ def test_admin_reports_pagination(client, db_session):
     assert len(data2["items"]) == 1
     # Ensure different items between pages
     assert data["items"][0]["id"] != data2["items"][0]["id"]
+
+
+# New tests for report resolve endpoint
+
+def test_admin_report_resolve_auth_and_behavior_and_audit(client, db_session):
+    admin = User(email="res_admin@example.com", password_hash="x", role=UserRole.admin, status=UserStatus.active)
+    reporter = User(email="rep_res@example.com", password_hash="x", role=UserRole.job_seeker, status=UserStatus.active)
+    db_session.add_all([admin, reporter])
+    db_session.flush()
+
+    report = Report(reported_by_user_id=reporter.id, entity_type="job", entity_id="job-123", reason="spam", status="OPEN")
+    db_session.add(report)
+    db_session.commit()
+
+    token_admin = create_access_token({"sub": admin.id, "role": admin.role.value})
+    token_reporter = create_access_token({"sub": reporter.id, "role": reporter.role.value})
+
+    # Unauthenticated -> 401
+    r = client.post(f"/api/admin/reports/{report.id}/resolve")
+    assert r.status_code == 401
+
+    # Non-admin -> 403
+    r = client.post(f"/api/admin/reports/{report.id}/resolve", headers=_auth_header(token_reporter))
+    assert r.status_code == 403
+
+    # Admin -> resolve succeeds
+    r = client.post(f"/api/admin/reports/{report.id}/resolve", headers=_auth_header(token_admin))
+    assert r.status_code == 200
+    data = r.json()
+    assert data["id"] == report.id
+    assert data["status"] == "RESOLVED"
+
+    # Verify DB state: expire local session state so we read fresh DB values
+    db_session.expire_all()
+    stmt = select(Report).where(Report.id == report.id)
+    found_report = db_session.execute(stmt).scalars().one()
+    assert found_report.status == "RESOLVED"
+    assert found_report.resolved_by == admin.id
+    assert found_report.resolved_at is not None
+
+    # Audit row exists with expected details
+    stmt_a = select(AdminAuditLog).where(AdminAuditLog.action_type == "REPORT_RESOLVE", AdminAuditLog.target_id == report.id)
+    found = db_session.execute(stmt_a).scalars().all()
+    assert len(found) >= 1
+    first_audit = found[-1]
+    assert first_audit.details_json.get("previous_status") in ("OPEN", "RESOLVED")
+    assert first_audit.details_json.get("new_status") == "RESOLVED"
+
+    # Idempotency: calling again returns 200 and does not change resolver fields
+    prev_resolved_by = found_report.resolved_by
+    prev_resolved_at = found_report.resolved_at
+
+    r2 = client.post(f"/api/admin/reports/{report.id}/resolve", headers=_auth_header(token_admin))
+    assert r2.status_code == 200
+    data2 = r2.json()
+    assert data2["status"] == "RESOLVED"
+
+    db_session.expire_all()
+    found_report_after = db_session.execute(stmt).scalars().one()
+    assert found_report_after.resolved_by == prev_resolved_by
+    assert found_report_after.resolved_at == prev_resolved_at
+
+    # Another audit entry should have been created for idempotent call
+    found_after = db_session.execute(stmt_a).scalars().all()
+    assert len(found_after) >= 2
+    assert found_after[-1].details_json.get("previous_status") == "RESOLVED"
+    assert found_after[-1].details_json.get("new_status") == "RESOLVED"
+
+
+def test_admin_report_resolve_404_when_missing(client, db_session):
+    admin = User(email="res_admin2@example.com", password_hash="x", role=UserRole.admin, status=UserStatus.active)
+    db_session.add(admin)
+    db_session.commit()
+
+    token_admin = create_access_token({"sub": admin.id, "role": admin.role.value})
+
+    r = client.post(f"/api/admin/reports/non-existent-id/resolve", headers=_auth_header(token_admin))
+    assert r.status_code == 404
