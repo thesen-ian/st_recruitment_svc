@@ -14,7 +14,7 @@ from st_recruitment_svc.models.base import (
     ApplicationStatusHistory,
     Interview,
     ApplicationStatus,
-    ApplicationStatus as AppStatusEnum,
+    InterviewStatus,
 )
 from st_recruitment_svc.services.notification_service import create_in_app_notification
 
@@ -63,7 +63,7 @@ def _already_notified(conn: Connection, user_id: str, notif_type: str, related_e
     """Return True when an equivalent notification already exists to avoid duplicates.
 
     We consider duplication by exact user/type/related_entity triplet. This is a simple
-    dedup heuristic sufficient to avoid duplicate notifications when listeners fire
+    dedupe heuristic sufficient to avoid duplicate notifications when listeners fire
     multiple times in a single transaction/flush.
     """
     try:
@@ -203,21 +203,17 @@ def _on_interview_insert(mapper, connection: Connection, target: Interview):
         job = _fetch_job_by_id(connection, app.get("job_id"))
         company_id = job.get("company_id") if job else None
 
+        # Per spec: when an interview is proposed (created) it's initiated by the company
+        # so notify the candidate (counterparty) only.
         title = "Interview proposed"
         body = "An interview has been proposed."
 
         if seeker_id:
-            if not _already_notified(connection, seeker_id, "interview_updates", "interview", interview_id):
+            if not _already_notified(connection, seeker_id, "interview_updated", "interview", interview_id):
                 try:
-                    create_in_app_notification(connection, seeker_id, "interview_updates", title, body, "interview", interview_id)
+                    create_in_app_notification(connection, seeker_id, "interview_updated", title, body, "interview", interview_id)
                 except Exception:
                     logger.exception("Failed to create seeker interview notification")
-        if company_id:
-            if not _already_notified(connection, company_id, "interview_updates", "interview", interview_id):
-                try:
-                    create_in_app_notification(connection, company_id, "interview_updates", title, body, "interview", interview_id)
-                except Exception:
-                    logger.exception("Failed to create company interview notification")
 
     except Exception as e:
         logger.error("Error handling interview insert notification: %s", e, exc_info=True)
@@ -248,21 +244,53 @@ def _on_interview_update(mapper, connection: Connection, target: Interview):
         job = _fetch_job_by_id(connection, app.get("job_id"))
         company_id = job.get("company_id") if job else None
 
+        # Choose title/body and recipient based on new status (inferring initiator)
+        status_val = getattr(target, "status", None)
+        status_str = status_val.value if hasattr(status_val, 'value') else status_val
+
         title = "Interview updated"
         body = "Interview details or status were updated."
+        # Default: notify both if we can't confidently pick
+        notify_to = []
 
-        if seeker_id:
-            if not _already_notified(connection, seeker_id, "interview_updates", "interview", interview_id):
+        try:
+            if status_str == InterviewStatus.accepted.value:
+                title = "Interview accepted"
+                body = "The candidate accepted the interview."
+                # Candidate initiated accept, notify company
+                if company_id:
+                    notify_to = [company_id]
+            elif status_str == InterviewStatus.reschedule_requested.value:
+                title = "Reschedule requested"
+                body = "A reschedule has been requested."
+                # Candidate initiated reschedule request, notify company
+                if company_id:
+                    notify_to = [company_id]
+            elif status_str == InterviewStatus.cancelled.value:
+                title = "Interview cancelled"
+                body = "The interview has been cancelled."
+                # Company initiated cancel, notify candidate
+                if seeker_id:
+                    notify_to = [seeker_id]
+            else:
+                # Unknown status transition: be conservative and notify both parties
+                if seeker_id:
+                    notify_to.append(seeker_id)
+                if company_id:
+                    notify_to.append(company_id)
+        except Exception:
+            # Fallback: notify both
+            if seeker_id:
+                notify_to.append(seeker_id)
+            if company_id:
+                notify_to.append(company_id)
+
+        for uid in notify_to:
+            if not _already_notified(connection, uid, "interview_updated", "interview", interview_id):
                 try:
-                    create_in_app_notification(connection, seeker_id, "interview_updates", title, body, "interview", interview_id)
+                    create_in_app_notification(connection, uid, "interview_updated", title, body, "interview", interview_id)
                 except Exception:
-                    logger.exception("Failed to create seeker interview update notification")
-        if company_id:
-            if not _already_notified(connection, company_id, "interview_updates", "interview", interview_id):
-                try:
-                    create_in_app_notification(connection, company_id, "interview_updates", title, body, "interview", interview_id)
-                except Exception:
-                    logger.exception("Failed to create company interview update notification")
+                    logger.exception("Failed to create interview update notification for user %s", uid)
 
     except Exception as e:
         logger.error("Error handling interview update notification: %s", e, exc_info=True)

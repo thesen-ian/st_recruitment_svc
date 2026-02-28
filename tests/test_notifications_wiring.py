@@ -187,3 +187,69 @@ def test_interview_proposal_creates_notification_for_candidate(client, db_sessio
     stmt_s = select(Notification).where(Notification.user_id == job_seeker.id, Notification.related_entity_type == "interview", Notification.related_entity_id == interview_id)
     rows_s = db_session.execute(stmt_s).scalars().all()
     assert len(rows_s) >= 1
+
+
+def test_interview_accept_creates_notification_for_company_and_respects_prefs(client, db_session):
+    # Setup company and seeker
+    company = User(email="i2-company@example.com", password_hash=hash_password("x"), role=UserRole.company)
+    job_seeker = User(email="i2-seeker@example.com", password_hash=hash_password("y"), role=UserRole.job_seeker, email_verified=True)
+    db_session.add_all([company, job_seeker])
+    db_session.flush()
+
+    # create job and application
+    r = client.post("/api/jobs", json={"title": "I2 Role", "description": "D", "questions": []}, headers=auth_header(create_access_token({"sub": company.id, "role": company.role.value})))
+    job = r.json()
+    client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(create_access_token({"sub": company.id, "role": company.role.value})))
+
+    fo = FileObject(owner_user_id=job_seeker.id, visibility="private", purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/i2x")
+    db_session.add(fo)
+    db_session.flush()
+    resume = Resume(user_id=job_seeker.id, label="R", file_object_id=fo.id)
+    db_session.add(resume)
+    db_session.commit()
+
+    stoken = create_access_token({"sub": job_seeker.id, "role": job_seeker.role.value})
+    ap = client.post(f"/api/jobs/{job['id']}/apply", json={"selected_resume_id": resume.id, "answers": []}, headers=auth_header(stoken))
+    assert ap.status_code == 201
+    app_id = ap.json()["application_id"]
+
+    # Company proposes interview
+    ctoken = create_access_token({"sub": company.id, "role": company.role.value})
+    start = (datetime.now(tz=timezone.utc) + timedelta(days=1)).isoformat()
+    payload = {"start_at": start, "duration_minutes": 30, "format": "video", "location_or_link": "https://meet", "interviewer_names": ["A"]}
+    resp = client.post(f"/api/applications/{app_id}/interview/propose", json=payload, headers=auth_header(ctoken))
+    assert resp.status_code == 201
+    interview_id = resp.json()["interview_id"]
+
+    # Ensure company does NOT have an interview notification (proposal not notifying company per spec)
+    stmt_c_pre = select(Notification).where(Notification.user_id == company.id, Notification.related_entity_type == "interview", Notification.related_entity_id == interview_id)
+    rows_c_pre = db_session.execute(stmt_c_pre).scalars().all()
+    assert len(rows_c_pre) == 0
+
+    # Candidate accepts interview -> should notify company
+    resp2 = client.post(f"/api/interviews/{interview_id}/accept", headers=auth_header(stoken))
+    assert resp2.status_code == 200
+
+    stmt_c = select(Notification).where(Notification.user_id == company.id, Notification.type == "interview_updated", Notification.related_entity_type == "interview", Notification.related_entity_id == interview_id)
+    rows_c = db_session.execute(stmt_c).scalars().all()
+    assert len(rows_c) >= 1
+
+    # Now verify preferences suppression: propose another interview on the same application and set company pref to disable interview updates
+    # Propose new interview on same application
+    resp = client.post(f"/api/applications/{app_id}/interview/propose", json=payload, headers=auth_header(ctoken))
+    assert resp.status_code == 201
+    interview_id2 = resp.json()["interview_id"]
+
+    # Set company preferences to disable interview updates
+    pref = NotificationPreferences(user_id=company.id, in_app_enabled=True, notify_interview_updates=False)
+    db_session.add(pref)
+    db_session.commit()
+
+    # Candidate accepts second interview
+    resp3 = client.post(f"/api/interviews/{interview_id2}/accept", headers=auth_header(stoken))
+    assert resp3.status_code == 200
+
+    # Company should NOT receive interview_updated notification for second interview due to prefs
+    stmt_c2 = select(Notification).where(Notification.user_id == company.id, Notification.type == "interview_updated", Notification.related_entity_type == "interview", Notification.related_entity_id == interview_id2)
+    rows_c2 = db_session.execute(stmt_c2).scalars().all()
+    assert len(rows_c2) == 0

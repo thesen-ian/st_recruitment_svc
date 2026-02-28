@@ -14,7 +14,8 @@ PREF_FIELD_BY_TYPE = {
     "application_submitted": "notify_application_submitted",
     "application_status_changed": "notify_application_status_changed",
     "application_withdrawn": "notify_application_withdrawn",
-    "interview_updates": "notify_interview_updates",
+    # Use canonical interview_updated type per spec and map it to the notify_interview_updates pref
+    "interview_updated": "notify_interview_updates",
     "admin_report_updates": "notify_admin_report_updates",
 }
 
