@@ -20,3 +20,6 @@ from .base import (
     Interview,
     InterviewRescheduleRequest,
 )
+
+# Import admin models so they are registered on Base.metadata for alembic and tests
+from .admin import Report, AdminAuditLog  # noqa: E402,F401

@@ -363,6 +363,8 @@ class Job(Base):
     title = Column(String(512), nullable=False)
     description = Column(Text, nullable=True)
     status = Column(SAEnum(JobStatus, name="job_status"), nullable=False, server_default=JobStatus.draft.value)
+    # Admin removal flag: exclude from public listings when true
+    is_removed = Column(Boolean, nullable=False, server_default='false')
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -371,6 +373,7 @@ class Job(Base):
     __table_args__ = (
         Index('idx_jobs_company_id', 'company_id'),
         Index('idx_jobs_status', 'status'),
+        Index('idx_jobs_is_removed', 'is_removed'),
     )
 
 
