@@ -1,6 +1,13 @@
 from .base import (
     Base,
     get_db,
+    # Export domain enums
+    UserRole,
+    UserStatus,
+    TokenType,
+    Visibility,
+    FilePurpose,
+    # Core models
     User,
     Token,
     FileObject,
