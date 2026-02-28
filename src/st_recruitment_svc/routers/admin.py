@@ -315,3 +315,100 @@ def admin_user_ban(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="failed to ban user")
+
+
+# New: admin jobs listing endpoint
+class JobListItem(BaseModel):
+    id: str
+    title: Optional[str]
+    created_at: Optional[datetime]
+    is_removed: bool
+
+
+@router.get("/jobs")
+def admin_jobs_list(
+    q: Optional[str] = Query(None),
+    removed: Optional[bool] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_admin=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Admin-only listing of jobs with optional search and removed filter.
+
+    Writes audit log on success.
+    """
+    try:
+        stmt = select(Job)
+        filters = []
+
+        if removed is not None:
+            # filter by is_removed boolean
+            if removed:
+                filters.append(Job.is_removed.is_(True))
+            else:
+                filters.append(Job.is_removed.is_(False))
+
+        if q:
+            ilike_q = f"%{q}%"
+            # Try to search title and company.company_name when available
+            try:
+                # Build filter first to avoid partial query state on failure
+                search_filter = or_(Job.title.ilike(ilike_q), User.company_name.ilike(ilike_q))
+                stmt = stmt.join(Job.company)
+                filters.append(search_filter)
+            except Exception as e:
+                logging.error(e, exc_info=True)
+                # Fallback: only title
+                try:
+                    filters.append(Job.title.ilike(ilike_q))
+                except Exception as e:
+                    logging.error(e, exc_info=True)
+
+        if filters:
+            stmt = stmt.where(and_(*filters))
+
+        # Ordering: created_at desc if present else id desc
+        try:
+            stmt = stmt.order_by(Job.created_at.desc())
+        except Exception:
+            stmt = stmt.order_by(Job.id.desc())
+
+        total_stmt = select(func.count()).select_from(stmt.subquery())
+        total = db.execute(total_stmt).scalar_one()
+
+        stmt = stmt.limit(limit).offset(offset)
+        rows = db.execute(stmt).scalars().all()
+
+        items = [
+            {
+                "id": r.id,
+                "title": getattr(r, "title", None),
+                "created_at": getattr(r, "created_at", None),
+                "is_removed": bool(getattr(r, "is_removed", False)),
+            }
+            for r in rows
+        ]
+
+        # Audit
+        details = {"q": q, "removed": removed, "limit": limit, "offset": offset}
+        write_admin_audit(
+            db,
+            admin_user_id=current_admin.id,
+            action_type="JOBS_LIST",
+            target_type="job",
+            target_id=None,
+            details_json=details,
+        )
+        db.commit()
+
+        return {"total": int(total or 0), "items": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="failed to list jobs")

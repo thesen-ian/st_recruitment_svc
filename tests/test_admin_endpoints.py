@@ -144,3 +144,61 @@ def test_suspend_and_ban_and_blocked_access_and_audit(client, db_session):
     # Banned user blocked
     r = client.post(f"/api/files/private/{target2.id}/download-token", headers=_auth_header(token_target2))
     assert r.status_code == 403
+
+
+# New tests for admin jobs listing
+
+def test_admin_jobs_list_access_control_and_filters_and_audit(client, db_session):
+    admin = User(email="jobs_admin@example.com", password_hash="x", role=UserRole.admin, status=UserStatus.active)
+    normal = User(email="normal2@example.com", password_hash="x", role=UserRole.job_seeker, status=UserStatus.active)
+    db_session.add_all([admin, normal])
+    db_session.flush()
+
+    # Create two jobs: one removed, one active
+    job_active = Job(company_id=admin.id, title="Active Job", status=JobStatus.published, is_removed=False)
+    job_removed = Job(company_id=admin.id, title="Removed Job", status=JobStatus.published, is_removed=True)
+    db_session.add_all([job_active, job_removed])
+    db_session.commit()
+
+    token_admin = create_access_token({"sub": admin.id, "role": admin.role.value})
+    token_normal = create_access_token({"sub": normal.id, "role": normal.role.value})
+
+    # Unauthenticated -> 401
+    r = client.get("/api/admin/jobs")
+    assert r.status_code == 401
+
+    # Non-admin -> 403
+    r = client.get("/api/admin/jobs", headers=_auth_header(token_normal))
+    assert r.status_code == 403
+
+    # Admin -> list all
+    r = client.get("/api/admin/jobs", headers=_auth_header(token_admin))
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] >= 2
+    titles = [it["title"] for it in data["items"]]
+    assert "Active Job" in titles and "Removed Job" in titles
+
+    # Filter removed=true
+    r = client.get("/api/admin/jobs?removed=true", headers=_auth_header(token_admin))
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] >= 1
+    assert all(it["is_removed"] for it in data["items"])
+
+    # Filter removed=false
+    r = client.get("/api/admin/jobs?removed=false", headers=_auth_header(token_admin))
+    assert r.status_code == 200
+    data = r.json()
+    assert all(not it["is_removed"] for it in data["items"])
+
+    # q search by title
+    r = client.get("/api/admin/jobs?q=Active", headers=_auth_header(token_admin))
+    assert r.status_code == 200
+    data = r.json()
+    assert any("Active Job" in (it.get("title") or "") for it in data["items"]) 
+
+    # Audit log for jobs list exists
+    stmt = select(AdminAuditLog).where(AdminAuditLog.action_type == "JOBS_LIST")
+    found = db_session.execute(stmt).scalars().all()
+    assert len(found) >= 1
