@@ -17,6 +17,15 @@ from st_recruitment_svc import config
 from st_recruitment_svc import scheduler
 from st_recruitment_svc import scheduler_jobs
 
+# Ensure notification listeners are registered on import
+# Importing this module registers SQLAlchemy event listeners used across the service.
+try:
+    import st_recruitment_svc.notification_listeners  # noqa: F401
+except Exception:
+    # Fail loudly during startup if listener registration has issues
+    logging.getLogger(__name__).exception("Failed to import notification_listeners")
+    raise
+
 # Configure logger for module
 logger = logging.getLogger(__name__)
 
