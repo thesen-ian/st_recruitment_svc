@@ -15,6 +15,7 @@ from st_recruitment_svc.models.base import (
     Resume,
     Application,
     ApplicationAnswer,
+    Visibility,
 )
 from st_recruitment_svc.auth import create_access_token, hash_password
 from sqlalchemy import select
@@ -214,34 +215,160 @@ def test_invalid_option_rejected(client, db_session):
     assert r.status_code == 400
 
 
-def test_file_answer_not_supported(client, db_session):
+# ---- New tests for FILE answers ----
+
+def test_file_answer_happy_path(client, db_session):
     company, ctoken = create_company_and_token(db_session)
-    payload = {"title": "T", "description": "D", "questions": [{"type": "file", "prompt": "Upload CV", "is_required": True}]}
+    payload = {"title": "Upload role", "description": "D", "questions": [{"type": "file", "prompt": "Upload CV", "is_required": True}]}
     r = client.post("/api/jobs", json=payload, headers=auth_header(ctoken))
     job = r.json()
     client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(ctoken))
 
-    seeker, stoken = create_job_seeker_and_token(db_session, email="s6@example.com", verified=True)
-    fo = FileObject(owner_user_id=seeker.id, visibility="private", purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/x6")
+    seeker, stoken = create_job_seeker_and_token(db_session, email="file-seeker@example.com", verified=True)
+    fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.private.value, purpose="application_answer", content_type="application/pdf", size_bytes=1024, storage_path="/tmp/file1")
     db_session.add(fo)
     db_session.flush()
-    resume = Resume(user_id=seeker.id, label="CV", file_object_id=fo.id)
+    resume_fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.private.value, purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/resume1")
+    db_session.add(resume_fo)
+    db_session.flush()
+    resume = Resume(user_id=seeker.id, label="CV", file_object_id=resume_fo.id)
     db_session.add(resume)
     db_session.commit()
 
-    # fetch job detail for question ids
     job_detail = client.get(f"/api/jobs/{job['id']}").json()
     qid = job_detail['questions'][0]['id']
 
-    # Attempt to answer with file_object_id should be rejected
     payload_apply = {"selected_resume_id": resume.id, "answers": [{"question_id": qid, "file_object_id": fo.id}]}
-    r = client.post(f"/api/jobs/{job['id']}/apply", json=payload_apply, headers=auth_header(stoken))
-    assert r.status_code == 400
+    resp = client.post(f"/api/jobs/{job['id']}/apply", json=payload_apply, headers=auth_header(stoken))
+    assert resp.status_code == 201, resp.text
+    data = resp.json()
+    # persisted answer should reference file_object_id
+    stmt = select(Application).where(Application.id == data['application_id'])
+    app_row = db_session.execute(stmt).scalars().first()
+    assert app_row is not None
+    ans_stmt = select(ApplicationAnswer).where(ApplicationAnswer.application_id == app_row.id)
+    answers = db_session.execute(ans_stmt).scalars().all()
+    assert len(answers) == 1
+    assert answers[0].file_object_id == fo.id
 
-    # no application persisted
+
+def test_file_too_large_rejected(client, db_session):
+    company, ctoken = create_company_and_token(db_session)
+    payload = {"title": "Upload role", "description": "D", "questions": [{"type": "file", "prompt": "Upload CV", "is_required": True}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(ctoken))
+    job = r.json()
+    client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(ctoken))
+
+    seeker, stoken = create_job_seeker_and_token(db_session, email="bigfile@example.com", verified=True)
+    # size > 5MB
+    fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.private.value, purpose="application_answer", content_type="application/pdf", size_bytes=6 * 1024 * 1024, storage_path="/tmp/large")
+    db_session.add(fo)
+    db_session.flush()
+    resume_fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.private.value, purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/res2")
+    db_session.add(resume_fo)
+    db_session.flush()
+    resume = Resume(user_id=seeker.id, label="CV", file_object_id=resume_fo.id)
+    db_session.add(resume)
+    db_session.commit()
+
+    job_detail = client.get(f"/api/jobs/{job['id']}").json()
+    qid = job_detail['questions'][0]['id']
+
+    payload_apply = {"selected_resume_id": resume.id, "answers": [{"question_id": qid, "file_object_id": fo.id}]}
+    resp = client.post(f"/api/jobs/{job['id']}/apply", json=payload_apply, headers=auth_header(stoken))
+    assert resp.status_code == 413
+
+    # ensure no application persisted
     stmt = select(Application).where(Application.job_id == job['id'])
     apps = db_session.execute(stmt).scalars().all()
     assert len(apps) == 0
+
+
+def test_file_not_found_returns_404(client, db_session):
+    company, ctoken = create_company_and_token(db_session)
+    payload = {"title": "Upload role", "description": "D", "questions": [{"type": "file", "prompt": "Upload CV", "is_required": True}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(ctoken))
+    job = r.json()
+    client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(ctoken))
+
+    seeker, stoken = create_job_seeker_and_token(db_session, email="nofile@example.com", verified=True)
+    resume_fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.private.value, purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/res3")
+    db_session.add(resume_fo)
+    db_session.flush()
+    resume = Resume(user_id=seeker.id, label="CV", file_object_id=resume_fo.id)
+    db_session.add(resume)
+    db_session.commit()
+
+    job_detail = client.get(f"/api/jobs/{job['id']}").json()
+    qid = job_detail['questions'][0]['id']
+
+    payload_apply = {"selected_resume_id": resume.id, "answers": [{"question_id": qid, "file_object_id": "00000000-0000-0000-0000-000000000000"}]}
+    resp = client.post(f"/api/jobs/{job['id']}/apply", json=payload_apply, headers=auth_header(stoken))
+    assert resp.status_code == 404
+
+    stmt = select(Application).where(Application.job_id == job['id'])
+    apps = db_session.execute(stmt).scalars().all()
+    assert len(apps) == 0
+
+
+def test_file_not_owned_returns_403(client, db_session):
+    company, ctoken = create_company_and_token(db_session)
+    payload = {"title": "Upload role", "description": "D", "questions": [{"type": "file", "prompt": "Upload CV", "is_required": True}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(ctoken))
+    job = r.json()
+    client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(ctoken))
+
+    owner, _ = create_job_seeker_and_token(db_session, email="owner@example.com", verified=True)
+    other, other_token = create_job_seeker_and_token(db_session, email="other@example.com", verified=True)
+
+    fo = FileObject(owner_user_id=owner.id, visibility=Visibility.private.value, purpose="application_answer", content_type="application/pdf", size_bytes=1024, storage_path="/tmp/ownerfile")
+    db_session.add(fo)
+    db_session.flush()
+    resume_fo = FileObject(owner_user_id=other.id, visibility=Visibility.private.value, purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/res4")
+    db_session.add(resume_fo)
+    db_session.flush()
+    resume = Resume(user_id=other.id, label="CV", file_object_id=resume_fo.id)
+    db_session.add(resume)
+    db_session.commit()
+
+    job_detail = client.get(f"/api/jobs/{job['id']}").json()
+    qid = job_detail['questions'][0]['id']
+
+    payload_apply = {"selected_resume_id": resume.id, "answers": [{"question_id": qid, "file_object_id": fo.id}]}
+    resp = client.post(f"/api/jobs/{job['id']}/apply", json=payload_apply, headers=auth_header(other_token))
+    assert resp.status_code == 403
+
+    stmt = select(Application).where(Application.job_id == job['id'])
+    apps = db_session.execute(stmt).scalars().all()
+    assert len(apps) == 0
+
+
+def test_file_public_rejected(client, db_session):
+    company, ctoken = create_company_and_token(db_session)
+    payload = {"title": "Upload role", "description": "D", "questions": [{"type": "file", "prompt": "Upload CV", "is_required": True}]}
+    r = client.post("/api/jobs", json=payload, headers=auth_header(ctoken))
+    job = r.json()
+    client.post(f"/api/jobs/{job['id']}/publish", headers=auth_header(ctoken))
+
+    seeker, stoken = create_job_seeker_and_token(db_session, email="publicfile@example.com", verified=True)
+    fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.public.value, purpose="application_answer", content_type="application/pdf", size_bytes=1024, storage_path="/tmp/pub")
+    db_session.add(fo)
+    db_session.flush()
+    resume_fo = FileObject(owner_user_id=seeker.id, visibility=Visibility.private.value, purpose="resume", content_type="application/pdf", size_bytes=1, storage_path="/tmp/res5")
+    db_session.add(resume_fo)
+    db_session.flush()
+    resume = Resume(user_id=seeker.id, label="CV", file_object_id=resume_fo.id)
+    db_session.add(resume)
+    db_session.commit()
+
+    job_detail = client.get(f"/api/jobs/{job['id']}").json()
+    qid = job_detail['questions'][0]['id']
+
+    payload_apply = {"selected_resume_id": resume.id, "answers": [{"question_id": qid, "file_object_id": fo.id}]}
+    resp = client.post(f"/api/jobs/{job['id']}/apply", json=payload_apply, headers=auth_header(stoken))
+
+    # we require private files and do not attempt to change visibility, so reject
+    assert resp.status_code == 400
 
 
 def test_authorization_checks(client, db_session):
