@@ -17,4 +17,6 @@ from .base import (
     ApplicationAnswer,
     ApplicationStatusHistory,
     ApplicationNote,
+    Interview,
+    InterviewRescheduleRequest,
 )

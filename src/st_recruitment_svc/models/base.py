@@ -132,6 +132,14 @@ class ApplicationStatus(str, enum.Enum):
         return self.value
 
 
+# Interview related enums
+class InterviewStatus(str, enum.Enum):
+    proposed = "proposed"
+    accepted = "accepted"
+    reschedule_requested = "reschedule_requested"
+    cancelled = "cancelled"
+
+
 # ORM models
 class User(Base):
     __tablename__ = "users"
@@ -439,6 +447,8 @@ class Application(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     answers = relationship("ApplicationAnswer", back_populates="application", cascade="all, delete-orphan")
+    # Link to interviews for higher-level workflows
+    interviews = relationship("Interview", back_populates="application", cascade="all, delete-orphan")
 
     __table_args__ = (
         UniqueConstraint('job_id', 'job_seeker_user_id', name='uq_applications_job_id_job_seeker_user_id'),
@@ -500,6 +510,47 @@ class ApplicationNote(Base):
     __table_args__ = (
         # Ensure index sorts by created_at DESC for newest-first queries
         Index('idx_application_notes_application_id_created_at', 'application_id', sa_text('created_at DESC')),
+    )
+
+
+# Interviews and reschedule requests
+class Interview(Base):
+    __tablename__ = "interviews"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    application_id = Column(String(36), ForeignKey("applications.id", ondelete="CASCADE"), nullable=False)
+    start_at = Column(DateTime(timezone=True), nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    format = Column(String(255), nullable=False)
+    location_or_link = Column(Text, nullable=False)
+    interviewer_names = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    status = Column(SAEnum(InterviewStatus, name="interview_status"), nullable=False, server_default=InterviewStatus.proposed.value)
+    reschedule_count = Column(Integer, nullable=False, server_default="0")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    application = relationship("Application", back_populates="interviews")
+    reschedule_requests = relationship("InterviewRescheduleRequest", back_populates="interview", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        Index('idx_interviews_application_id', 'application_id'),
+    )
+
+
+class InterviewRescheduleRequest(Base):
+    __tablename__ = "interview_reschedule_requests"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    interview_id = Column(String(36), ForeignKey("interviews.id", ondelete="CASCADE"), nullable=False)
+    requested_by_user_id = Column(String(36), nullable=False, index=True)
+    reason = Column(Text, nullable=False)
+    preferred_times = Column(JSON_TYPE, nullable=False, server_default=JSON_SERVER_DEFAULT)
+    requested_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    interview = relationship("Interview", back_populates="reschedule_requests")
+
+    __table_args__ = (
+        Index('idx_interview_reschedule_requests_interview_id', 'interview_id'),
     )
 
 
