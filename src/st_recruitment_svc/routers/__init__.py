@@ -266,3 +266,7 @@ router.include_router(interviews.router)
 # Include notification preferences router
 from . import notification_preferences
 router.include_router(notification_preferences.router)
+
+# Include notifications router
+from . import notifications
+router.include_router(notifications.router)
