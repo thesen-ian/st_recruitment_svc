@@ -10,6 +10,7 @@ from sqlalchemy import select, func, and_, or_
 
 from st_recruitment_svc.auth import require_admin, get_current_user
 from st_recruitment_svc.models.base import get_db, User, UserRole, UserStatus, Job, JobStatus, Application
+from st_recruitment_svc.models.admin import Report
 from st_recruitment_svc.services.admin_audit import write_admin_audit
 
 # Apply admin-only RBAC at router level so all /admin/* endpoints are protected
@@ -456,3 +457,107 @@ def admin_job_remove(
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="failed to remove job")
+
+
+# New: admin reports listing endpoint
+class ReportListItem(BaseModel):
+    id: str
+    entity_type: str
+    entity_id: str
+    reason: str
+    description: Optional[str]
+    status: str
+    reported_by_user_id: str
+    created_at: Optional[datetime]
+    resolved_at: Optional[datetime]
+    resolved_by: Optional[str]
+
+
+@router.get("/reports")
+def admin_reports_list(
+    status: Optional[str] = Query(None),
+    entity_type: Optional[str] = Query(None),
+    reported_by_user_id: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_admin=Depends(get_current_user),
+    db=Depends(get_db),
+):
+    """Admin-only listing of reports with filters, pagination, and audit logging.
+
+    status allowed values: OPEN, RESOLVED
+    """
+    try:
+        # Validate status
+        if status is not None and status not in ("OPEN", "RESOLVED"):
+            raise HTTPException(status_code=400, detail="invalid status filter")
+
+        stmt = select(Report)
+        filters = []
+
+        if status is not None:
+            filters.append(Report.status == status)
+        if entity_type is not None:
+            filters.append(Report.entity_type == entity_type)
+        if reported_by_user_id is not None:
+            filters.append(Report.reported_by_user_id == reported_by_user_id)
+
+        if filters:
+            stmt = stmt.where(and_(*filters))
+
+        # Ordering: newest first
+        try:
+            stmt = stmt.order_by(Report.created_at.desc())
+        except Exception:
+            stmt = stmt.order_by(Report.id.desc())
+
+        total_stmt = select(func.count()).select_from(stmt.subquery())
+        total = db.execute(total_stmt).scalar_one()
+
+        stmt = stmt.limit(limit).offset(offset)
+        rows = db.execute(stmt).scalars().all()
+
+        items = [
+            {
+                "id": r.id,
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "reason": r.reason,
+                "description": getattr(r, "description", None),
+                "status": r.status,
+                "reported_by_user_id": r.reported_by_user_id,
+                "created_at": getattr(r, "created_at", None),
+                "resolved_at": getattr(r, "resolved_at", None),
+                "resolved_by": getattr(r, "resolved_by", None),
+            }
+            for r in rows
+        ]
+
+        # Audit
+        details = {
+            "status": status,
+            "entity_type": entity_type,
+            "reported_by_user_id": reported_by_user_id,
+            "limit": limit,
+            "offset": offset,
+        }
+        write_admin_audit(
+            db,
+            admin_user_id=current_admin.id,
+            action_type="REPORTS_LIST",
+            target_type="report",
+            target_id=None,
+            details_json=details,
+        )
+        db.commit()
+
+        return {"total": int(total or 0), "items": items}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="failed to list reports")
