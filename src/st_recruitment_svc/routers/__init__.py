@@ -254,3 +254,7 @@ router.include_router(companies.router)
 # Include new applications router (do not swallow import errors)
 from . import applications
 router.include_router(applications.router)
+
+# Include withdraw router
+from . import withdraw
+router.include_router(withdraw.router)
