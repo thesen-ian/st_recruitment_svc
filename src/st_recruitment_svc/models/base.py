@@ -240,27 +240,46 @@ class Notification(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
-    type = Column(String(255), nullable=False)
     title = Column(String(255), nullable=False)
-    message = Column(Text, nullable=False)
+    body = Column(Text, nullable=False)
+    type = Column(String(255), nullable=False)
     related_entity_type = Column(String(255), nullable=True)
-    related_entity_id = Column(String(255), nullable=True)
+    related_entity_id = Column(String(36), nullable=True)
     is_read = Column(Boolean, nullable=False, server_default="false")
+    read_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user = relationship("User", back_populates="notifications")
+
+    __table_args__ = (
+        Index('idx_notifications_user_created_at', 'user_id', sa_text('created_at DESC')),
+        Index('idx_notifications_user_is_read_created_at', 'user_id', 'is_read', sa_text('created_at DESC')),
+        CheckConstraint('(read_at IS NULL) OR (is_read = 1)', name='chk_notifications_read_at_consistent'),
+    )
 
 
 class NotificationPreferences(Base):
     __tablename__ = "notification_preferences"
 
-    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
-    email_enabled = Column(Boolean, nullable=False, server_default="true")
-    sms_enabled = Column(Boolean, nullable=False, server_default="false")
-    push_enabled = Column(Boolean, nullable=False, server_default="true")
-    per_event_settings_json = Column(JSON, nullable=False, server_default='{}')
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    # ensure a single preference row per user via a named UniqueConstraint below
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    in_app_enabled = Column(Boolean, nullable=False, server_default="true")
+    notify_application_submitted = Column(Boolean, nullable=False, server_default="true")
+    notify_application_status_changed = Column(Boolean, nullable=False, server_default="true")
+    notify_application_withdrawn = Column(Boolean, nullable=False, server_default="true")
+    notify_interview_updates = Column(Boolean, nullable=False, server_default="true")
+    notify_admin_report_updates = Column(Boolean, nullable=False, server_default="true")
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user = relationship("User", back_populates="notification_preferences")
+
+    __table_args__ = (
+        UniqueConstraint('user_id', name='uq_notification_preferences_user_id'),
+        Index('idx_notification_preferences_user_id', 'user_id'),
+    )
 
 
 class JobSeekerProfile(Base):

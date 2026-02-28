@@ -30,16 +30,37 @@ def upgrade() -> None:
 
     # Ensure one-to-one mapping between resume row and file_object reuse is prevented
     try:
-        op.create_unique_constraint('uq_resumes_file_object_id', 'resumes', ['file_object_id'])
+        # SQLite does not support ALTER TABLE ADD CONSTRAINT; create a unique index instead
+        bind = op.get_bind()
+        dialect = getattr(bind, 'dialect', None)
+        name = getattr(dialect, 'name', None)
+        if name == 'sqlite':
+            # unique index enforces uniqueness on sqlite without table rewrite
+            op.create_index('uq_resumes_file_object_id', 'resumes', ['file_object_id'], unique=True)
+        else:
+            op.create_unique_constraint('uq_resumes_file_object_id', 'resumes', ['file_object_id'])
     except Exception as e:
         logger.error("Failed to create uq_resumes_file_object_id: %s", e, exc_info=True)
 
 
 def downgrade() -> None:
     try:
-        op.drop_constraint('uq_resumes_file_object_id', 'resumes', type_='unique')
+        bind = op.get_bind()
+        dialect = getattr(bind, 'dialect', None)
+        name = getattr(dialect, 'name', None)
+        if name == 'sqlite':
+            try:
+                op.drop_index('uq_resumes_file_object_id', table_name='resumes')
+            except Exception as e:
+                logger.error("Failed to drop uq_resumes_file_object_id index: %s", e, exc_info=True)
+        else:
+            try:
+                op.drop_constraint('uq_resumes_file_object_id', 'resumes', type_='unique')
+            except Exception as e:
+                logger.error("Failed to drop uq_resumes_file_object_id constraint: %s", e, exc_info=True)
     except Exception as e:
-        logger.error("Failed to drop uq_resumes_file_object_id: %s", e, exc_info=True)
+        logger.error("Failed to determine dialect while dropping uq_resumes_file_object_id: %s", e, exc_info=True)
+
     try:
         op.drop_index('idx_resumes_user_id', table_name='resumes')
     except Exception as e:

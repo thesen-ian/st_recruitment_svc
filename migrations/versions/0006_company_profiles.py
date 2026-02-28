@@ -29,7 +29,14 @@ def upgrade() -> None:
 
     # Unique constraint to enforce one-to-one mapping between user(company) and profile
     try:
-        op.create_unique_constraint('uq_company_profiles_company_id', 'company_profiles', ['company_id'])
+        bind = op.get_bind()
+        dialect = getattr(bind, 'dialect', None)
+        name = getattr(dialect, 'name', None)
+        if name == 'sqlite':
+            # use unique index on sqlite to avoid ALTER constraint errors
+            op.create_index('uq_company_profiles_company_id', 'company_profiles', ['company_id'], unique=True)
+        else:
+            op.create_unique_constraint('uq_company_profiles_company_id', 'company_profiles', ['company_id'])
     except Exception as e:
         logger.error("Failed to create uq_company_profiles_company_id: %s", e, exc_info=True)
 
@@ -53,8 +60,22 @@ def downgrade() -> None:
         op.drop_index('idx_company_profiles_logo_file_object_id', table_name='company_profiles')
     except Exception as e:
         logger.error("Failed to drop idx_company_profiles_logo_file_object_id: %s", e, exc_info=True)
+
     try:
-        op.drop_constraint('uq_company_profiles_company_id', 'company_profiles', type_='unique')
+        bind = op.get_bind()
+        dialect = getattr(bind, 'dialect', None)
+        name = getattr(dialect, 'name', None)
+        if name == 'sqlite':
+            try:
+                op.drop_index('uq_company_profiles_company_id', table_name='company_profiles')
+            except Exception as e:
+                logger.error("Failed to drop uq_company_profiles_company_id index: %s", e, exc_info=True)
+        else:
+            try:
+                op.drop_constraint('uq_company_profiles_company_id', 'company_profiles', type_='unique')
+            except Exception as e:
+                logger.error("Failed to drop uq_company_profiles_company_id: %s", e, exc_info=True)
     except Exception as e:
-        logger.error("Failed to drop uq_company_profiles_company_id: %s", e, exc_info=True)
+        logger.error("Failed to determine dialect while dropping uq_company_profiles_company_id: %s", e, exc_info=True)
+
     op.drop_table('company_profiles')
