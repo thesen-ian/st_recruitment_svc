@@ -1,4 +1,4 @@
-# Migration 0013 - notifications (no-op edit to produce a commit)
+# Migration 0013 - notifications (fixed UUID generation for SQLite compatibility)
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy import CheckConstraint
@@ -18,7 +18,7 @@ def upgrade() -> None:
     try:
         op.create_table(
             'notification_preferences',
-            sa.Column('id', sa.String(length=36), primary_key=True, nullable=False),
+            sa.Column('id', sa.String(length=36), primary_key=True),
             sa.Column('user_id', sa.String(length=36), nullable=False, unique=True),
             sa.Column('in_app_enabled', sa.Boolean(), nullable=False, server_default=sa.text('true')),
             sa.Column('notify_application_submitted', sa.Boolean(), nullable=False, server_default=sa.text('true')),
@@ -37,7 +37,7 @@ def upgrade() -> None:
     try:
         op.create_table(
             'notifications',
-            sa.Column('id', sa.String(length=36), primary_key=True, nullable=False),
+            sa.Column('id', sa.String(length=36), primary_key=True),
             sa.Column('user_id', sa.String(length=36), nullable=False),
             sa.Column('type', sa.String(length=64), nullable=False),
             sa.Column('title', sa.String(length=200), nullable=False),
