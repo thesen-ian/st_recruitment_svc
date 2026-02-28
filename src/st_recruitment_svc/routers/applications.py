@@ -23,6 +23,7 @@ from st_recruitment_svc.models.base import (
     Application,
     ApplicationAnswer,
     Visibility,
+    UserRole,
 )
 
 logger = logging.getLogger(__name__)
@@ -347,3 +348,98 @@ def list_company_applications(
     except Exception:
         logger.exception("Failed to list applications for company %s", getattr(current_user, "id", None))
         raise HTTPException(status_code=500, detail="Internal error")
+
+
+# ----------------- Application detail endpoint -----------------
+@router.get("/applications/{application_id}")
+def get_application_detail(
+    application_id: str,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Any:
+    """
+    Return application details including answers. Authorization: job seeker owner, company owner, or admin.
+    """
+    try:
+        stmt = select(Application).options(selectinload(Application.answers)).where(Application.id == application_id)
+        app_row = db.execute(stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if app_row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="application not found")
+
+    # Load job posting to check company ownership and question ordering when available
+    try:
+        job_stmt = select(JobPosting).options(selectinload(JobPosting.questions)).where(JobPosting.id == app_row.job_id)
+        job = db.execute(job_stmt).scalars().first()
+    except Exception:
+        logger.exception("DB error loading job for application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    # Authorization
+    allowed = False
+    try:
+        if getattr(current_user, "role", None) == UserRole.admin:
+            allowed = True
+        elif getattr(current_user, "role", None) == UserRole.job_seeker and app_row.job_seeker_user_id == current_user.id:
+            allowed = True
+        elif getattr(current_user, "role", None) == UserRole.company:
+            # require job existence and matching company id
+            if job is not None and getattr(job, "company_id", None) == current_user.id:
+                allowed = True
+    except Exception:
+        logger.exception("Error during authorization checks for application %s and user %s", application_id, getattr(current_user, "id", None))
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="forbidden")
+
+    # Prepare question ordering map if job and questions available
+    q_order: Dict[str, int] = {}
+    if job is not None:
+        try:
+            qs = getattr(job, "questions", []) or []
+            for idx, q in enumerate(qs):
+                # Use explicit position if available otherwise fallback to enumeration
+                pos = getattr(q, "position", None)
+                q_order[q.id] = pos if pos is not None else idx
+        except Exception:
+            logger.debug("Failed to build question order map for job %s", getattr(job, "id", None))
+
+    # Build answers list with stable ordering
+    answers_out: List[Dict[str, Optional[str]]] = []
+    answers = getattr(app_row, "answers", []) or []
+
+    def answer_sort_key(ans: ApplicationAnswer):
+        # sort by question position if known, else by question_id to be stable
+        pos = q_order.get(ans.question_id)
+        return (pos if pos is not None else 10**9, ans.question_id)
+
+    try:
+        for ans in sorted(answers, key=answer_sort_key):
+            answers_out.append(
+                {
+                    "question_id": ans.question_id,
+                    "answer_text": ans.answer_text,
+                    "selected_option_id": ans.selected_option_id,
+                    "file_object_id": ans.file_object_id,
+                }
+            )
+    except Exception:
+        logger.exception("Failed to serialize answers for application %s", application_id)
+        raise HTTPException(status_code=500, detail="Internal error")
+
+    result = {
+        "application_id": app_row.id,
+        "job_id": app_row.job_id,
+        "job_seeker_user_id": app_row.job_seeker_user_id,
+        "selected_resume_id": app_row.selected_resume_id,
+        "cover_letter": app_row.cover_letter,
+        "status": app_row.status,
+        "applied_at": app_row.applied_at.isoformat() if getattr(app_row, "applied_at", None) is not None else None,
+        "answers": answers_out,
+    }
+
+    return result
