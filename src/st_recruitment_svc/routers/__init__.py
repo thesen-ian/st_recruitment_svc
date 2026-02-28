@@ -258,3 +258,7 @@ router.include_router(applications.router)
 # Include withdraw router
 from . import withdraw
 router.include_router(withdraw.router)
+
+# Include interviews router
+from . import interviews
+router.include_router(interviews.router)
