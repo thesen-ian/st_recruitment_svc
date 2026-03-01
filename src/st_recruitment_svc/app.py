@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
-app = FastAPI(debug=True, root_path=st_recruitment_svc)
+# Create FastAPI app instance. Keep root_path default to avoid NameError.
+app = FastAPI(debug=True)
 
 # add routers
